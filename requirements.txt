@@ -1,0 +1,14 @@
+streamlit==1.32.0
+pandas==2.1.4
+numpy==1.26.3
+Pillow==10.1.0
+pytz==2023.3.post1
+fpdf2==2.7.7
+pyserial==3.5
+python-dateutil==2.8.2
+pyzbar==0.1.9
+opencv-python-headless==4.8.1.78
+streamlit-option-menu==0.3.6
+matplotlib==3.7.2
+plotly==5.15.0
+reportlab==4.0.4
