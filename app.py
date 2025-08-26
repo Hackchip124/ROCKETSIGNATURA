@@ -644,7 +644,7 @@ def dashboard():
     
     st.session_state.last_activity = time.time()
     
-    st.title("Supermarket POS Dashboard")
+    st.title("ROCKET VAPE POS ")
     st.sidebar.title("Navigation")
     
     # Shift management for cashiers
@@ -663,6 +663,7 @@ def dashboard():
     # Navigation
     pages = {
         "Dashboard": dashboard_content,
+        "Transaction History": transaction_history,
         "POS Terminal": pos_terminal,
         "Product Management": product_management,
         "Inventory Management": inventory_management,
@@ -706,6 +707,179 @@ def dashboard():
     
     # Display selected page
     pages[selected_page]()
+
+def transaction_history():
+    st.title("Transaction History")
+    
+    transactions = load_data(TRANSACTIONS_FILE)
+    
+    if not transactions:
+        st.info("No transactions found")
+        return
+    
+    # Filters
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+    with col2:
+        end_date = st.date_input("End Date", value=datetime.date.today())
+    with col3:
+        cashier_filter = st.selectbox("Filter by Cashier", 
+                                    ["All"] + list(set(t.get('cashier', 'Unknown') for t in transactions.values())))
+    
+    # Apply filters
+    filtered_transactions = []
+    for transaction_id, transaction in transactions.items():
+        try:
+            trans_date = datetime.datetime.strptime(transaction.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= trans_date <= end_date:
+                if cashier_filter == "All" or transaction.get('cashier', 'Unknown') == cashier_filter:
+                    filtered_transactions.append((transaction_id, transaction))
+        except (ValueError, KeyError):
+            continue
+    
+    # Sort by date (newest first)
+    filtered_transactions.sort(key=lambda x: x[1].get('date', ''), reverse=True)
+    
+    if not filtered_transactions:
+        st.info("No transactions match the selected filters")
+        return
+    
+    st.write(f"**Found {len(filtered_transactions)} transactions**")
+    
+    # Display transactions
+    for transaction_id, transaction in filtered_transactions:
+        with st.expander(f"Transaction #{transaction_id} - {transaction.get('date', 'Unknown date')} - {format_currency(transaction.get('total', 0))}"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write(f"**Date:** {transaction.get('date', 'N/A')}")
+                st.write(f"**Cashier:** {transaction.get('cashier', 'N/A')}")
+                st.write(f"**Payment Method:** {transaction.get('payment_method', 'N/A')}")
+                
+                if transaction.get('customer_id'):
+                    loyalty_data = load_data(LOYALTY_FILE)
+                    customer = loyalty_data.get('customers', {}).get(transaction['customer_id'], {})
+                    if customer:
+                        st.write(f"**Customer:** {customer.get('name', 'N/A')}")
+                        st.write(f"**Loyalty ID:** {transaction['customer_id']}")
+            
+            with col2:
+                st.write(f"**Subtotal:** {format_currency(transaction.get('subtotal', 0))}")
+                st.write(f"**Tax:** {format_currency(transaction.get('tax', 0))}")
+                
+                if transaction.get('discount', 0) > 0:
+                    st.write(f"**Discount:** -{format_currency(transaction.get('discount', 0))}")
+                
+                if transaction.get('loyalty_discount', 0) > 0:
+                    st.write(f"**Loyalty Discount:** -{format_currency(transaction.get('loyalty_discount', 0))}")
+                
+                st.write(f"**Total:** {format_currency(transaction.get('total', 0))}")
+                
+                if transaction.get('payment_charge_amount', 0) > 0:
+                    st.write(f"**Payment Fee:** {format_currency(transaction.get('payment_charge_amount', 0))}")
+            
+            # Items list
+            st.write("**Items:**")
+            for barcode, item in transaction.get('items', {}).items():
+                st.write(f"- {item.get('name', 'Unknown')} x{item.get('quantity', 0)} @ {format_currency(item.get('price', 0))} each")
+            
+            # Reprint options
+            st.markdown("---")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("🖨️ Reprint Receipt", key=f"print_{transaction_id}"):
+                    receipt_text = generate_receipt(transaction)
+                    if print_receipt(receipt_text):
+                        st.success("Receipt printed successfully")
+                    else:
+                        st.error("Failed to print receipt")
+            
+            with col2:
+                if st.button("📄 View Receipt", key=f"view_{transaction_id}"):
+                    receipt_text = generate_receipt(transaction)
+                    st.text_area("Receipt Content", receipt_text, height=300, key=f"receipt_{transaction_id}")
+            
+            with col3:
+                # Download as text
+                receipt_text = generate_receipt(transaction)
+                st.download_button(
+                    label="📝 Download Text",
+                    data=receipt_text,
+                    file_name=f"receipt_{transaction_id}.txt",
+                    mime="text/plain",
+                    key=f"download_{transaction_id}"
+                )
+    
+    # Bulk actions
+    st.markdown("---")
+    st.subheader("Bulk Actions")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Export All to CSV"):
+            export_transactions_to_csv(filtered_transactions)
+    
+    with col2:
+        if st.button("Print All Receipts"):
+            print_all_receipts(filtered_transactions)
+
+def export_transactions_to_csv(transactions):
+    """Export transactions to CSV format"""
+    import csv
+    from io import StringIO
+    
+    # Prepare data
+    csv_data = []
+    for transaction_id, transaction in transactions:
+        for barcode, item in transaction.get('items', {}).items():
+            csv_data.append({
+                'transaction_id': transaction_id,
+                'date': transaction.get('date', ''),
+                'cashier': transaction.get('cashier', ''),
+                'product_barcode': barcode,
+                'product_name': item.get('name', ''),
+                'quantity': item.get('quantity', 0),
+                'unit_price': item.get('price', 0),
+                'total_price': item.get('price', 0) * item.get('quantity', 0),
+                'payment_method': transaction.get('payment_method', ''),
+                'transaction_total': transaction.get('total', 0)
+            })
+    
+    # Create CSV
+    output = StringIO()
+    if csv_data:
+        writer = csv.DictWriter(output, fieldnames=csv_data[0].keys())
+        writer.writeheader()
+        writer.writerows(csv_data)
+        
+        st.download_button(
+            label="Download CSV",
+            data=output.getvalue(),
+            file_name=f"transactions_export_{datetime.date.today()}.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("No data to export")
+
+def print_all_receipts(transactions):
+    """Print receipts for all transactions"""
+    success_count = 0
+    total_count = len(transactions)
+    
+    with st.spinner(f"Printing {total_count} receipts..."):
+        for transaction_id, transaction in transactions:
+            receipt_text = generate_receipt(transaction)
+            if print_receipt(receipt_text):
+                success_count += 1
+            # Add a small delay to avoid overwhelming the printer
+            time.sleep(0.5)
+    
+    if success_count == total_count:
+        st.success(f"Successfully printed {success_count} receipts")
+    else:
+        st.warning(f"Printed {success_count} of {total_count} receipts. Some may have failed.")
 
 def dashboard_content():
     st.header("Overview")
