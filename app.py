@@ -2846,34 +2846,21 @@ def generate_receipt(transaction):
 # Returns & Refunds Management Module
 # Returns & Refunds Management Module - with reliable print functionality
 def returns_management():
-    st.title("Returns & Refunds")
+    st.title("🔄 Returns & Refunds")
     
-    # Initialize session state for print handling
+    # Initialize session state
     if 'print_receipt' not in st.session_state:
         st.session_state.print_receipt = None
+    if 'print_return_id' not in st.session_state:
+        st.session_state.print_return_id = None
+    if 'exchange_cart' not in st.session_state:
+        st.session_state.exchange_cart = {}
+    if 'exchange_mode' not in st.session_state:
+        st.session_state.exchange_mode = False
     
     # Handle print requests
-    if st.session_state.print_receipt:
-        # Create a simple print dialog
-        st.title("Print Receipt")
-        
-        # Display the receipt content
-        st.text_area("Receipt Content", st.session_state.print_receipt, height=300)
-
-        
-        # Download option
-        st.download_button(
-            label="📄 Download Receipt",
-            data=st.session_state.print_receipt,
-            file_name="return_receipt.txt",
-            mime="text/plain"
-        )
-        
-        # Back button
-        if st.button("← Back to Returns"):
-            st.session_state.print_receipt = None
-            st.rerun()
-        
+    if st.session_state.print_receipt and st.session_state.print_return_id:
+        print_return_receipt(st.session_state.print_return_id)
         return
     
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -2894,6 +2881,7 @@ def returns_management():
     
     with tab4:
         return_settings_tab()
+
 
 def return_settings_tab():
     if not is_manager():
@@ -2948,197 +2936,420 @@ def return_settings_tab():
             )
         )
         
+        # Exchange settings
+        st.subheader("Exchange Settings")
+        exchange_period = st.number_input(
+            "Exchange Period (days)",
+            min_value=0,
+            max_value=365,
+            value=return_settings.get('exchange_period', 60),
+            help="Number of days customers have to exchange items"
+        )
+        
+        allow_partial_exchange = st.checkbox(
+            "Allow Partial Exchanges",
+            value=return_settings.get('allow_partial_exchange', True),
+            help="Allow customers to exchange only some of the returned items"
+        )
+        
         if st.form_submit_button("Save Settings"):
             settings['return_settings'] = {
                 'return_period': return_period,
                 'require_receipt': require_receipt,
                 'restocking_fee': restocking_fee,
                 'non_returnable_items': [item.strip() for item in non_returnable_items.split('\n') if item.strip()],
-                'default_refund_method': default_refund_method
+                'default_refund_method': default_refund_method,
+                'exchange_period': exchange_period,
+                'allow_partial_exchange': allow_partial_exchange
             }
             save_data(settings, SETTINGS_FILE)
             st.success("Return settings saved successfully")
 
 def process_return_tab():
-    st.header("Process Return")
+    st.header("Process Return/Exchange")
     
     transactions = load_data(TRANSACTIONS_FILE)
     products = load_data(PRODUCTS_FILE)
     inventory = load_data(INVENTORY_FILE)
+    settings = load_data(SETTINGS_FILE)
+    tax_rate = settings.get('tax_rate', 0.0)
     
     # Step 1: Find transaction
     st.subheader("Step 1: Find Transaction")
-    transaction_id = st.text_input("Enter Transaction ID or Scan Receipt Barcode")
+    transaction_id = st.text_input("Enter Transaction ID or Scan Receipt Barcode", key="return_transaction_id")
     
-    if transaction_id:
-        if transaction_id in transactions:
-            transaction = transactions[transaction_id]
-            
-            # Display transaction details
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.info(f"**Date:** {transaction['date']}")
-            with col2:
-                st.info(f"**Total:** {format_currency(transaction['total'])}")
-            with col3:
-                st.info(f"**Payment Method:** {transaction['payment_method']}")
-            
-            # Step 2: Select items to return
-            st.subheader("Step 2: Select Items to Return")
-            
-            return_items = {}
-            for barcode, item in transaction['items'].items():
-                with st.expander(f"{item['name']} - {item['quantity']} x {format_currency(item['price'])}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        max_returnable = item['quantity']
-                        current_stock = inventory.get(barcode, {}).get('quantity', 0)
-                        st.write(f"**Purchased:** {max_returnable}")
-                        st.write(f"**Current Stock:** {current_stock}")
-                        
-                        return_qty = st.number_input(
-                            "Quantity to Return", 
-                            min_value=0, 
-                            max_value=max_returnable, 
-                            value=0, 
-                            key=f"return_{barcode}"
+    if transaction_id and transaction_id in transactions:
+        transaction = transactions[transaction_id]
+        
+        # Display transaction details
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.info(f"**Date:** {transaction['date']}")
+        with col2:
+            st.info(f"**Total:** {format_currency(transaction['total'])}")
+        with col3:
+            st.info(f"**Payment Method:** {transaction['payment_method']}")
+        
+        # Step 2: Select items to return
+        st.subheader("Step 2: Select Items to Return")
+        
+        return_items = {}
+        for barcode, item in transaction['items'].items():
+            with st.expander(f"{item['name']} - {item['quantity']} x {format_currency(item['price'])}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    max_returnable = item['quantity']
+                    current_stock = inventory.get(barcode, {}).get('quantity', 0)
+                    st.write(f"**Purchased:** {max_returnable}")
+                    st.write(f"**Current Stock:** {current_stock}")
+                    
+                    return_qty = st.number_input(
+                        "Quantity to Return", 
+                        min_value=0, 
+                        max_value=max_returnable, 
+                        value=0, 
+                        key=f"return_{barcode}"
+                    )
+                
+                with col2:
+                    if return_qty > 0:
+                        return_reason = st.selectbox(
+                            "Reason for Return",
+                            ["", "Defective", "Wrong Item", "Customer Changed Mind", 
+                             "Damaged", "Expired", "Quality Issue", "Other"],
+                            key=f"reason_{barcode}"
                         )
-                    
-                    with col2:
-                        if return_qty > 0:
-                            return_reason = st.selectbox(
-                                "Reason for Return",
-                                ["", "Defective", "Wrong Item", "Customer Changed Mind", 
-                                 "Damaged", "Expired", "Quality Issue", "Other"],
-                                key=f"reason_{barcode}"
-                            )
-                            
-                            if return_reason == "Other":
-                                return_reason = st.text_input("Please specify reason", key=f"other_reason_{barcode}")
-                            
-                            condition = st.selectbox(
-                                "Item Condition",
-                                ["", "Unopened", "Opened", "Damaged", "Used"],
-                                key=f"condition_{barcode}"
-                            )
-                            
-                            if return_qty > 0 and return_reason and condition:
-                                return_items[barcode] = {
-                                    'name': item['name'],
-                                    'quantity': return_qty,
-                                    'price': item['price'],
-                                    'subtotal': return_qty * item['price'],
-                                    'reason': return_reason,
-                                    'condition': condition
-                                }
-                                st.success(f"{return_qty} item(s) marked for return")
+                        
+                        if return_reason == "Other":
+                            return_reason = st.text_input("Please specify reason", key=f"other_reason_{barcode}")
+                        
+                        condition = st.selectbox(
+                            "Item Condition",
+                            ["", "Unopened", "Opened", "Damaged", "Used"],
+                            key=f"condition_{barcode}"
+                        )
+                        
+                        if return_qty > 0 and return_reason and condition:
+                            return_items[barcode] = {
+                                'name': item['name'],
+                                'quantity': return_qty,
+                                'price': item['price'],
+                                'subtotal': return_qty * item['price'],
+                                'reason': return_reason,
+                                'condition': condition
+                            }
+                            st.success(f"{return_qty} item(s) marked for return")
+        
+        # Step 3: Process return or exchange
+        if return_items:
+            st.subheader("Step 3: Process Return")
             
-            # Step 3: Process return
-            if return_items:
-                st.subheader("Step 3: Process Return")
+            # Calculate refund amounts
+            total_refund = sum(item['subtotal'] for item in return_items.values())
+            original_tax_rate = transaction['tax'] / transaction['subtotal'] if transaction['subtotal'] > 0 else 0
+            tax_refund = total_refund * original_tax_rate
+            total_refund_amount = total_refund + tax_refund
+            
+            st.write(f"**Subtotal Refund:** {format_currency(total_refund)}")
+            st.write(f"**Tax Refund:** {format_currency(tax_refund)}")
+            st.write(f"**Total Refund:** {format_currency(total_refund_amount)}")
+            
+            # Return/Exchange options
+            st.subheader("Return Options")
+            return_option = st.radio("Select Option", 
+                                   ["Refund", "Exchange", "Store Credit"], 
+                                   help="Choose how to handle the return")
+            
+            exchange_difference = 0
+            exchange_products = []  # Changed to list
+            exchange_subtotal = 0
+            exchange_tax = 0
+            exchange_total = 0
+            refund_method = None
+            
+            if return_option == "Exchange":
+                st.session_state.exchange_mode = True
+                st.session_state.exchange_cart = {}
                 
-                # Calculate refund amounts
-                total_refund = sum(item['subtotal'] for item in return_items.values())
-                original_tax_rate = transaction['tax'] / transaction['subtotal'] if transaction['subtotal'] > 0 else 0
-                tax_refund = total_refund * original_tax_rate
-                total_refund_amount = total_refund + tax_refund
+                st.info("🔄 Exchange Mode: Select products for exchange")
                 
-                st.write(f"**Subtotal Refund:** {format_currency(total_refund)}")
-                st.write(f"**Tax Refund:** {format_currency(tax_refund)}")
-                st.write(f"**Total Refund:** {format_currency(total_refund_amount)}")
+                # Display products for exchange
+                products_data = load_data(PRODUCTS_FILE)
+                inventory_data = load_data(INVENTORY_FILE)
                 
-                # Determine refund method
-                original_payment_method = transaction['payment_method']
-                refund_method = st.selectbox(
-                    "Refund Method",
-                    ["Original Payment Method", "Cash", "Store Credit", "Exchange"],
-                    index=0 if original_payment_method != "Cash" else 1
-                )
+                # Filter available products
+                available_products = {}
+                for barcode, product in products_data.items():
+                    stock = inventory_data.get(barcode, {}).get('quantity', 0)
+                    if stock > 0 and product.get('active', True):
+                        available_products[barcode] = product
                 
-                if refund_method == "Store Credit":
-                    customer_id = st.text_input("Customer ID for Store Credit", help="Enter customer loyalty ID if available")
+                # Product selection for exchange
+                st.subheader("Select Exchange Products")
                 
-                # Additional notes
-                return_notes = st.text_area("Additional Notes")
+                # Search and filter
+                col1, col2 = st.columns(2)
+                with col1:
+                    search_term = st.text_input("Search Products", placeholder="Product name or barcode")
+                with col2:
+                    categories = load_data(CATEGORIES_FILE).get('categories', [])
+                    selected_category = st.selectbox("Filter by Category", [""] + categories)
                 
-                if st.button("Process Return", type="primary"):
-                    # Create return record
-                    returns = load_data(RETURNS_FILE)
-                    return_id = f"RET_{generate_short_id()}"
+                # Filter products
+                filtered_products = {}
+                for barcode, product in available_products.items():
+                    matches_search = not search_term or (
+                        search_term.lower() in product['name'].lower() or 
+                        search_term.lower() in barcode.lower()
+                    )
+                    matches_category = not selected_category or product.get('category') == selected_category
                     
-                    return_record = {
-                        'return_id': return_id,
-                        'transaction_id': transaction_id,
-                        'original_date': transaction['date'],
-                        'return_date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
-                        'items': return_items,
-                        'subtotal_refund': total_refund,
-                        'tax_refund': tax_refund,
-                        'total_refund': total_refund_amount,
-                        'refund_method': refund_method,
-                        'original_payment_method': original_payment_method,
-                        'reason': "Multiple items" if len(return_items) > 1 else list(return_items.values())[0]['reason'],
-                        'condition': "Various" if len(return_items) > 1 else list(return_items.values())[0]['condition'],
-                        'notes': return_notes,
-                        'processed_by': st.session_state.user_info['username'],
-                        'shift_id': st.session_state.shift_id if is_cashier() else None,
-                        'status': 'completed' if refund_method != "Exchange" else 'pending_exchange'
-                    }
+                    if matches_search and matches_category:
+                        filtered_products[barcode] = product
+                
+                # Display products in grid
+                if filtered_products:
+                    cols = st.columns(3)
+                    for idx, (barcode, product) in enumerate(filtered_products.items()):
+                        with cols[idx % 3]:
+                            with st.container():
+                                st.markdown(f"**{product['name']}**")
+                                st.write(f"Price: {format_currency(product['price'])}")
+                                
+                                stock = inventory_data.get(barcode, {}).get('quantity', 0)
+                                st.write(f"Stock: {stock}")
+                                
+                                # Add to exchange cart
+                                exchange_qty = st.number_input("Qty", 0, stock, 1, key=f"ex_qty_{barcode}")
+                                
+                                if st.button(f"Add to Exchange", key=f"add_ex_{barcode}", use_container_width=True):
+                                    if barcode in st.session_state.exchange_cart:
+                                        st.session_state.exchange_cart[barcode]['quantity'] += exchange_qty
+                                    else:
+                                        st.session_state.exchange_cart[barcode] = {
+                                            'name': product['name'],
+                                            'price': product['price'],
+                                            'quantity': exchange_qty
+                                        }
+                                    st.success(f"Added {exchange_qty} {product['name']} to exchange")
+                
+                # Display exchange cart
+                if st.session_state.exchange_cart:
+                    st.subheader("🛒 Exchange Cart")
                     
-                    if refund_method == "Store Credit" and customer_id:
-                        return_record['customer_id'] = customer_id
+                    exchange_subtotal = 0
+                    for barcode, item in st.session_state.exchange_cart.items():
+                        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+                        with col1:
+                            st.write(f"**{item['name']}**")
+                        with col2:
+                            st.write(f"Qty: {item['quantity']}")
+                        with col3:
+                            item_total = item['price'] * item['quantity']
+                            st.write(f"{format_currency(item_total)}")
+                        with col4:
+                            if st.button("❌", key=f"remove_ex_{barcode}"):
+                                del st.session_state.exchange_cart[barcode]
+                                st.rerun()
+                        
+                        exchange_subtotal += item_total
                     
-                    # Update inventory
-                    for barcode, item in return_items.items():
+                    # Calculate exchange tax and total
+                    exchange_tax = exchange_subtotal * tax_rate
+                    exchange_total = exchange_subtotal + exchange_tax
+                    
+                    st.write(f"**Exchange Subtotal:** {format_currency(exchange_subtotal)}")
+                    st.write(f"**Exchange Tax ({tax_rate*100}%):** {format_currency(exchange_tax)}")
+                    st.write(f"**Exchange Total:** {format_currency(exchange_total)}")
+                    
+                    # Calculate difference
+                    exchange_difference = exchange_total - total_refund_amount
+                    if exchange_difference > 0:
+                        st.warning(f"Customer needs to pay: {format_currency(exchange_difference)}")
+                    elif exchange_difference < 0:
+                        st.info(f"Customer gets refund: {format_currency(abs(exchange_difference))}")
+                    else:
+                        st.success("Even exchange - no payment needed")
+                    
+                    # Convert exchange cart to list format for storage
+                    exchange_products = [
+                        {
+                            'barcode': barcode,
+                            'name': item['name'],
+                            'price': item['price'],
+                            'quantity': item['quantity'],
+                            'subtotal': item['price'] * item['quantity']
+                        }
+                        for barcode, item in st.session_state.exchange_cart.items()
+                    ]
+            
+            # Payment method for refund or additional payment
+            if return_option in ["Refund", "Exchange"] and (return_option != "Exchange" or exchange_difference != 0):
+                st.subheader("Payment Details")
+                
+                if return_option == "Refund":
+                    refund_method = st.selectbox(
+                        "Refund Method",
+                        ["Original Payment Method", "Cash", "Store Credit"],
+                        index=0 if transaction['payment_method'] != "Cash" else 1
+                    )
+                else:  # Exchange
+                    if exchange_difference > 0:
+                        refund_method = st.selectbox(
+                            "Additional Payment Method",
+                            ["Cash", "Credit Card", "Debit Card", "Mobile Payment"],
+                            help="Customer needs to pay the difference"
+                        )
+                    else:
+                        refund_method = st.selectbox(
+                            "Refund Method for Difference",
+                            ["Cash", "Store Credit", "Original Payment Method"],
+                            help="Customer gets refund for the difference"
+                        )
+            
+            # Additional notes
+            return_notes = st.text_area("Additional Notes", placeholder="Any special instructions...")
+            
+            if st.button("Process Return", type="primary", use_container_width=True):
+                # Create return record
+                returns = load_data(RETURNS_FILE)
+                return_id = f"RET_{generate_short_id()}"
+                
+                # Determine refund method for the record
+                if return_option == "Store Credit":
+                    record_refund_method = "Store Credit"
+                elif return_option == "Exchange" and exchange_difference == 0:
+                    record_refund_method = "Exchange (Even)"
+                else:
+                    record_refund_method = refund_method
+                
+                return_record = {
+                    'return_id': return_id,
+                    'transaction_id': transaction_id,
+                    'original_date': transaction['date'],
+                    'return_date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                    'items': return_items,
+                    'subtotal_refund': total_refund,
+                    'tax_refund': tax_refund,
+                    'total_refund': total_refund_amount,
+                    'refund_method': record_refund_method,
+                    'original_payment_method': transaction['payment_method'],
+                    'reason': "Multiple items" if len(return_items) > 1 else list(return_items.values())[0]['reason'],
+                    'condition': "Various" if len(return_items) > 1 else list(return_items.values())[0]['condition'],
+                    'notes': return_notes,
+                    'processed_by': st.session_state.user_info['username'],
+                    'shift_id': st.session_state.shift_id if is_cashier() else None,
+                    'status': 'completed'
+                }
+                
+                # Handle exchange
+                if return_option == "Exchange":
+                    return_record['exchange_products'] = exchange_products
+                    return_record['exchange_subtotal'] = exchange_subtotal
+                    return_record['exchange_tax'] = exchange_tax
+                    return_record['exchange_total'] = exchange_total
+                    return_record['exchange_difference'] = exchange_difference
+                    return_record['status'] = 'exchange_processed'
+                
+                # Update inventory for returned items
+                for barcode, item in return_items.items():
+                    if barcode in inventory:
+                        inventory[barcode]['quantity'] += item['quantity']
+                    else:
+                        inventory[barcode] = {'quantity': item['quantity']}
+                    
+                    # Add restock note
+                    inventory[barcode]['last_restock'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                    inventory[barcode]['restock_reason'] = f"Return: {item['reason']}"
+                
+                # Update inventory for exchange products
+                if return_option == "Exchange":
+                    for item in exchange_products:
+                        barcode = item['barcode']
                         if barcode in inventory:
-                            inventory[barcode]['quantity'] += item['quantity']
-                        else:
-                            inventory[barcode] = {'quantity': item['quantity']}
-                        
-                        # Add restock note
-                        inventory[barcode]['last_restock'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
-                        inventory[barcode]['restock_reason'] = f"Return: {item['reason']}"
-                    
-                    # Handle cash drawer if refund is cash
-                    if refund_method == "Cash" and is_cashier() and st.session_state.shift_started:
+                            inventory[barcode]['quantity'] -= item['quantity']
+                            inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                            inventory[barcode]['updated_by'] = st.session_state.user_info['username']
+                
+                # Handle cash drawer for cash transactions
+                if (return_option == "Refund" and refund_method == "Cash") or \
+                   (return_option == "Exchange" and refund_method == "Cash"):
+                    if is_cashier() and st.session_state.shift_started:
                         cash_drawer = load_data(CASH_DRAWER_FILE)
-                        cash_drawer['current_balance'] -= total_refund_amount
-                        cash_drawer['transactions'].append({
-                            'type': 'refund',
-                            'amount': -total_refund_amount,
-                            'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
-                            'return_id': return_id,
-                            'processed_by': st.session_state.user_info['username']
-                        })
+                        
+                        if return_option == "Refund":
+                            # Regular refund
+                            cash_drawer['current_balance'] -= total_refund_amount
+                            cash_drawer['transactions'].append({
+                                'type': 'refund',
+                                'amount': -total_refund_amount,
+                                'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                                'return_id': return_id,
+                                'processed_by': st.session_state.user_info['username']
+                            })
+                        else:
+                            # Exchange with cash difference
+                            if exchange_difference > 0:
+                                # Customer pays difference
+                                cash_drawer['current_balance'] += exchange_difference
+                                cash_drawer['transactions'].append({
+                                    'type': 'exchange_payment',
+                                    'amount': exchange_difference,
+                                    'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                                    'return_id': return_id,
+                                    'processed_by': st.session_state.user_info['username']
+                                })
+                            else:
+                                # Customer gets refund
+                                cash_drawer['current_balance'] -= abs(exchange_difference)
+                                cash_drawer['transactions'].append({
+                                    'type': 'exchange_refund',
+                                    'amount': -abs(exchange_difference),
+                                    'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                                    'return_id': return_id,
+                                    'processed_by': st.session_state.user_info['username']
+                                })
+                        
                         save_data(cash_drawer, CASH_DRAWER_FILE)
-                    
-                    # Save everything
-                    returns[return_id] = return_record
-                    save_data(returns, RETURNS_FILE)
-                    save_data(inventory, INVENTORY_FILE)
-                    
-                    st.success(f"Return processed successfully! Return ID: {return_id}")
-                    
-                    # Generate and display receipt
-                    return_receipt = generate_return_receipt(return_record)
-                    st.subheader("Return Receipt")
-                    st.text(return_receipt)
-                    
-                    # Print options
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("🖨️ Print Receipt"):
-                            st.session_state.print_receipt = return_receipt
-                            st.rerun()
-                    with col2:
-                        st.download_button(
-                            label="📄 Download Receipt",
-                            data=return_receipt,
-                            file_name=f"return_receipt_{return_id}.txt",
-                            mime="text/plain"
-                        )
+                
+                # Save everything
+                returns[return_id] = return_record
+                save_data(returns, RETURNS_FILE)
+                save_data(inventory, INVENTORY_FILE)
+                
+                st.success(f"Return processed successfully! Return ID: {return_id}")
+                
+                # Show receipt and print options
+                return_receipt = generate_return_receipt(return_record)
+                st.subheader("Return Receipt")
+                st.text(return_receipt)
+                
+                # Print options
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("🖨️ Print Receipt", key="print_return_btn"):
+                        st.session_state.print_receipt = True
+                        st.session_state.print_return_id = return_id
+                        st.rerun()
+                with col2:
+                    if st.button("📄 Download PDF", key="dl_pdf_return_btn"):
+                        download_pdf_receipt(return_record, "return")
+                with col3:
+                    st.download_button(
+                        label="📝 Download Text",
+                        data=return_receipt,
+                        file_name=f"return_receipt_{return_id}.txt",
+                        mime="text/plain",
+                        key="dl_txt_return_btn"
+                    )
+                
+                # Reset exchange state
+                st.session_state.exchange_mode = False
+                st.session_state.exchange_cart = {}
         else:
-            st.error("Transaction not found. Please check the Transaction ID.")
+            st.info("No items selected for return")
+    elif transaction_id:
+        st.error("Transaction not found. Please check the Transaction ID.")
 
 def return_analytics_tab():
     st.header("Return Analytics")
@@ -3153,9 +3364,9 @@ def return_analytics_tab():
     # Date range selector
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+        start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30), key="analytics_start")
     with col2:
-        end_date = st.date_input("End Date", value=datetime.date.today())
+        end_date = st.date_input("End Date", value=datetime.date.today(), key="analytics_end")
     
     # Filter returns by date
     filtered_returns = []
@@ -3237,15 +3448,14 @@ def view_returns_tab():
     if not returns:
         st.info("No returns processed yet")
         return
-    
     # Filters
     col1, col2, col3 = st.columns(3)
     with col1:
-        date_filter = st.selectbox("Date Range", ["Last 7 days", "Last 30 days", "Last 90 days", "All time"])
+        date_filter = st.selectbox("Date Range", ["Last 7 days", "Last 30 days", "Last 90 days", "All time"], key="view_date_filter")
     with col2:
-        status_filter = st.selectbox("Status", ["All", "completed", "pending_exchange", "cancelled"])
+        status_filter = st.selectbox("Status", ["All", "completed", "pending_exchange", "cancelled", "exchange_processed"], key="view_status_filter")
     with col3:
-        refund_filter = st.selectbox("Refund Method", ["All", "Cash", "Store Credit", "Original Payment Method", "Exchange"])
+        refund_filter = st.selectbox("Refund Method", ["All", "Cash", "Store Credit", "Original Payment Method", "Exchange"], key="view_refund_filter")
     
     # Apply filters
     filtered_returns = []
@@ -3289,13 +3499,24 @@ def view_returns_tab():
                 st.write(f"**Status:** {return_data.get('status', 'completed').title()}")
             
             with col2:
-                # Use get() with default values to avoid KeyError
                 st.write(f"**Subtotal Refund:** {format_currency(return_data.get('subtotal_refund', 0))}")
                 st.write(f"**Tax Refund:** {format_currency(return_data.get('tax_refund', 0))}")
                 st.write(f"**Total Refund:** {format_currency(return_data.get('total_refund', 0))}")
                 st.write(f"**Reason:** {return_data.get('reason', 'N/A')}")
-                if return_data.get('customer_id'):
-                    st.write(f"**Customer ID:** {return_data['customer_id']}")
+            
+            # Exchange details if any - FIXED: Handle list format
+            if 'exchange_products' in return_data and return_data['exchange_products']:
+                st.write("**Exchange Items:**")
+                # Handle list format for exchange products
+                for item in return_data['exchange_products']:
+                    st.write(f"- {item.get('name', 'Unknown')} x{item.get('quantity', 0)} @ {format_currency(item.get('price', 0))}")
+                
+                if 'exchange_difference' in return_data:
+                    difference = return_data['exchange_difference']
+                    if difference > 0:
+                        st.write(f"**Additional Payment:** {format_currency(difference)}")
+                    elif difference < 0:
+                        st.write(f"**Refund Given:** {format_currency(abs(difference))}")
             
             # Items details
             st.write("**Returned Items:**")
@@ -3307,12 +3528,14 @@ def view_returns_tab():
             with col1:
                 if st.button("View Receipt", key=f"view_{return_id}"):
                     receipt_text = generate_return_receipt(return_data)
-                    st.text(receipt_text)
+                    st.text_area("Receipt Content", receipt_text, height=200, key=f"receipt_{return_id}")
+            
             with col2:
                 if st.button("Print Receipt", key=f"print_{return_id}"):
-                    receipt_text = generate_return_receipt(return_data)
-                    st.session_state.print_receipt = receipt_text
+                    st.session_state.print_receipt = True
+                    st.session_state.print_return_id = return_id
                     st.rerun()
+            
             with col3:
                 if is_manager() and return_data.get('status') == 'pending_exchange':
                     if st.button("Complete Exchange", key=f"complete_{return_id}"):
@@ -3394,6 +3617,218 @@ def refund_history_tab():
                 st.write(f"**Reason:** {return_data['reason']}")
                 st.write(f"**Status:** {return_data['status']}")
 
+def print_return_receipt(return_id):
+    """Handle return receipt printing"""
+    returns_data = load_data(RETURNS_FILE)
+    
+    if return_id in returns_data:
+        return_data = returns_data[return_id]
+        receipt_text = generate_return_receipt(return_data)
+        
+        st.title("🖨️ Print Return Receipt")
+        
+        # Display the receipt content
+        st.text_area("Receipt Content", receipt_text, height=300, key="receipt_display")
+        
+        # Print options
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🖨️ Browser Print", use_container_width=True):
+                print_receipt_browser(receipt_text, "Return Receipt")
+        
+        with col2:
+            if st.button("📄 Download PDF", use_container_width=True):
+                download_pdf_receipt(return_data, "return")
+        
+        with col3:
+            st.download_button(
+                label="📝 Download Text",
+                data=receipt_text,
+                file_name=f"return_receipt_{return_id}.txt",
+                mime="text/plain",
+                key="download_return_txt"
+            )
+        
+        # Back button
+        if st.button("← Back to Returns", use_container_width=True):
+            st.session_state.print_receipt = None
+            st.session_state.print_return_id = None
+            st.rerun()
+    else:
+        st.error("Return not found")
+        if st.button("← Back to Returns"):
+            st.session_state.print_receipt = None
+            st.session_state.print_return_id = None
+            st.rerun()
+
+def print_receipt_browser(receipt_text, title="Receipt"):
+    """Print receipt using browser's print functionality"""
+    js_code = f"""
+    <script>
+    function printReceipt() {{
+        const printWindow = window.open('', '_blank', 'width=400,height=600');
+        const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>{title}</title>
+            <style>
+                body {{
+                    font-family: 'Courier New', monospace;
+                    font-size: 12px;
+                    padding: 10px;
+                    line-height: 1.2;
+                }}
+                .receipt {{
+                    white-space: pre-wrap;
+                    word-wrap: break-word;
+                }}
+                @media print {{
+                    body {{
+                        margin: 0;
+                        padding: 10px;
+                    }}
+                    .no-print {{
+                        display: none !important;
+                    }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="receipt">{receipt_text}</div>
+        </body>
+        </html>
+        `;
+        
+        printWindow.document.write(htmlContent);
+        printWindow.document.close();
+        
+        printWindow.onload = function() {{
+            printWindow.print();
+            setTimeout(() => printWindow.close(), 500);
+        }};
+    }}
+    
+    setTimeout(printReceipt, 100);
+    </script>
+    """
+    
+    st.components.v1.html(js_code, height=0)
+
+def download_pdf_receipt(return_data, receipt_type="return"):
+    """Download PDF receipt for returns"""
+    try:
+        pdf = FPDF.FPDF(format=(80, 200))
+        pdf.add_page()
+        pdf.set_font("Courier", size=10)
+        
+        # Store header
+        settings = load_data(SETTINGS_FILE)
+        pdf.cell(0, 5, settings.get('store_name', 'SUPERMARKET POS'), 0, 1, 'C')
+        pdf.set_font("Courier", size=8)
+        pdf.cell(0, 4, settings.get('store_address', ''), 0, 1, 'C')
+        pdf.cell(0, 4, f"Tel: {settings.get('store_phone', '')}", 0, 1, 'C')
+        
+        pdf.ln(2)
+        pdf.set_font("Courier", size=10)
+        
+        if receipt_type == "return":
+            pdf.cell(0, 5, "RETURN RECEIPT", 0, 1, 'C')
+        else:
+            pdf.cell(0, 5, "EXCHANGE RECEIPT", 0, 1, 'C')
+            
+        pdf.line(10, pdf.get_y(), 70, pdf.get_y())
+        pdf.ln(2)
+        
+        # Return information
+        pdf.cell(0, 4, f"Return #: {return_data.get('return_id', 'N/A')}", 0, 1)
+        pdf.cell(0, 4, f"Original Trans: {return_data.get('transaction_id', 'N/A')}", 0, 1)
+        pdf.cell(0, 4, f"Date: {return_data.get('return_date', 'N/A')}", 0, 1)
+        pdf.cell(0, 4, f"Processed by: {return_data.get('processed_by', 'N/A')}", 0, 1)
+        pdf.line(10, pdf.get_y(), 70, pdf.get_y())
+        pdf.ln(2)
+        
+        # Returned items
+        pdf.cell(0, 4, "RETURNED ITEMS:", 0, 1)
+        pdf.line(10, pdf.get_y(), 70, pdf.get_y())
+        
+        for barcode, item in return_data.get('items', {}).items():
+            name = item.get('name', 'Unknown')[:18] + ('..' if len(item.get('name', '')) > 18 else '')
+            pdf.cell(30, 4, name, 0, 0)
+            pdf.cell(15, 4, f"x{item.get('quantity', 0)}", 0, 0, 'R')
+            pdf.cell(25, 4, format_currency(item.get('subtotal', 0)), 0, 1, 'R')
+        
+        pdf.line(10, pdf.get_y(), 70, pdf.get_y())
+        pdf.ln(2)
+        
+        # Exchange products if any - FIXED: Handle list format
+        if 'exchange_products' in return_data and return_data['exchange_products']:
+            pdf.cell(0, 4, "EXCHANGE ITEMS:", 0, 1)
+            pdf.line(10, pdf.get_y(), 70, pdf.get_y())
+            
+            # Handle list format for exchange products
+            for item in return_data['exchange_products']:
+                name = item.get('name', 'Unknown')[:18] + ('..' if len(item.get('name', '')) > 18 else '')
+                item_total = item.get('price', 0) * item.get('quantity', 0)
+                pdf.cell(30, 4, name, 0, 0)
+                pdf.cell(15, 4, f"x{item.get('quantity', 0)}", 0, 0, 'R')
+                pdf.cell(25, 4, format_currency(item_total), 0, 1, 'R')
+            
+            pdf.line(10, pdf.get_y(), 70, pdf.get_y())
+            pdf.ln(2)
+            
+            # Exchange totals
+            if 'exchange_subtotal' in return_data:
+                pdf.cell(45, 4, "Exchange Subtotal:", 0, 0)
+                pdf.cell(25, 4, format_currency(return_data.get('exchange_subtotal', 0)), 0, 1, 'R')
+                
+                pdf.cell(45, 4, "Exchange Tax:", 0, 0)
+                pdf.cell(25, 4, format_currency(return_data.get('exchange_tax', 0)), 0, 1, 'R')
+                
+                pdf.cell(45, 4, "Exchange Total:", 0, 0)
+                pdf.cell(25, 4, format_currency(return_data.get('exchange_total', 0)), 0, 1, 'R')
+            
+            # Exchange difference
+            if 'exchange_difference' in return_data:
+                difference = return_data.get('exchange_difference', 0)
+                if difference > 0:
+                    pdf.cell(45, 4, "Additional Payment:", 0, 0)
+                    pdf.cell(25, 4, format_currency(difference), 0, 1, 'R')
+                elif difference < 0:
+                    pdf.cell(45, 4, "Refund Due:", 0, 0)
+                    pdf.cell(25, 4, format_currency(abs(difference)), 0, 1, 'R')
+        
+        # Totals
+        pdf.cell(45, 4, "Subtotal Refund:", 0, 0)
+        pdf.cell(25, 4, format_currency(return_data.get('subtotal_refund', 0)), 0, 1, 'R')
+        
+        pdf.cell(45, 4, "Tax Refund:", 0, 0)
+        pdf.cell(25, 4, format_currency(return_data.get('tax_refund', 0)), 0, 1, 'R')
+        
+        pdf.set_font("Courier", 'B', 10)
+        pdf.cell(45, 5, "TOTAL REFUND:", 0, 0)
+        pdf.cell(25, 5, format_currency(return_data.get('total_refund', 0)), 0, 1, 'R')
+        
+        pdf.set_font("Courier", size=8)
+        pdf.cell(0, 4, f"Method: {return_data.get('refund_method', 'N/A')}", 0, 1)
+        pdf.cell(0, 4, f"Reason: {return_data.get('reason', 'N/A')}", 0, 1)
+        
+        pdf_data = pdf.output(dest='S').encode('latin1')
+        
+        st.download_button(
+            label="📄 Download PDF Receipt",
+            data=pdf_data,
+            file_name=f"return_receipt_{return_data.get('return_id', 'unknown')}.pdf",
+            mime="application/pdf",
+            key=f"dl_pdf_{return_data.get('return_id', 'unknown')}"
+        )
+        return True
+        
+    except Exception as e:
+        st.error(f"PDF creation failed: {str(e)}")
+        return False
+    
 def generate_return_receipt(return_data):
     settings = load_data(SETTINGS_FILE)
     receipt = []
@@ -3404,7 +3839,12 @@ def generate_return_receipt(return_data):
     receipt.append(f"{settings.get('store_address', '').center(50)}")
     receipt.append(f"Tel: {settings.get('store_phone', '').center(50)}")
     receipt.append("=" * 50)
-    receipt.append("RETURN RECEIPT".center(50))
+    
+    if 'exchange_products' in return_data:
+        receipt.append("EXCHANGE RECEIPT".center(50))
+    else:
+        receipt.append("RETURN RECEIPT".center(50))
+    
     receipt.append("=" * 50)
     
     # Return information
@@ -3415,28 +3855,58 @@ def generate_return_receipt(return_data):
     receipt.append(f"Reason: {return_data['reason']}")
     receipt.append("-" * 50)
     
-    # Items header
+    # Returned items
     receipt.append("RETURNED ITEMS:")
     receipt.append("-" * 50)
     receipt.append(f"{'ITEM'.ljust(30)}{'QTY'.rjust(5)}{'AMOUNT'.rjust(15)}")
     receipt.append("-" * 50)
     
-    # Items
     for barcode, item in return_data['items'].items():
         name = item['name'][:28] + ('..' if len(item['name']) > 28 else '')
         receipt.append(f"{name.ljust(30)}{str(item['quantity']).rjust(5)}{format_currency(item['subtotal']).rjust(15)}")
     
+    # Exchange items if any - FIXED: Handle list format
+    if 'exchange_products' in return_data and return_data['exchange_products']:
+        receipt.append("-" * 50)
+        receipt.append("EXCHANGE ITEMS:")
+        receipt.append("-" * 50)
+        receipt.append(f"{'ITEM'.ljust(30)}{'QTY'.rjust(5)}{'AMOUNT'.rjust(15)}")
+        receipt.append("-" * 50)
+        
+        # Handle list format for exchange products
+        for item in return_data['exchange_products']:
+            name = item['name'][:28] + ('..' if len(item['name']) > 28 else '')
+            item_total = item['price'] * item['quantity']
+            receipt.append(f"{name.ljust(30)}{str(item['quantity']).rjust(5)}{format_currency(item_total).rjust(15)}")
+    
     # Totals
     receipt.append("-" * 50)
-    receipt.append(f"{'Subtotal Refund:'.ljust(35)}{format_currency(return_data['total_refund'] - return_data['tax_refund']).rjust(15)}")
-    receipt.append(f"{'Tax Refund:'.ljust(35)}{format_currency(return_data['tax_refund']).rjust(15)}")
+    receipt.append(f"{'Subtotal Refund:'.ljust(35)}{format_currency(return_data['total_refund'] - return_data.get('tax_refund', 0)).rjust(15)}")
+    receipt.append(f"{'Tax Refund:'.ljust(35)}{format_currency(return_data.get('tax_refund', 0)).rjust(15)}")
+    
+    # Exchange totals if any
+    if 'exchange_subtotal' in return_data:
+        receipt.append("-" * 50)
+        receipt.append("EXCHANGE TOTALS:")
+        receipt.append(f"{'Exchange Subtotal:'.ljust(35)}{format_currency(return_data.get('exchange_subtotal', 0)).rjust(15)}")
+        receipt.append(f"{'Exchange Tax:'.ljust(35)}{format_currency(return_data.get('exchange_tax', 0)).rjust(15)}")
+        receipt.append(f"{'Exchange Total:'.ljust(35)}{format_currency(return_data.get('exchange_total', 0)).rjust(15)}")
+    
+    # Exchange difference
+    if 'exchange_difference' in return_data:
+        difference = return_data['exchange_difference']
+        if difference > 0:
+            receipt.append(f"{'Additional Payment:'.ljust(35)}{format_currency(difference).rjust(15)}")
+        elif difference < 0:
+            receipt.append(f"{'Refund Due:'.ljust(35)}{format_currency(abs(difference)).rjust(15)}")
+    
     receipt.append("=" * 50)
     receipt.append(f"{'TOTAL REFUND:'.ljust(35)}{format_currency(return_data['total_refund']).rjust(15)}")
     receipt.append("=" * 50)
     
     # Payment information
     receipt.append(f"Refund Method: {return_data['refund_method']}")
-    receipt.append(f"Status: {return_data['status']}")
+    receipt.append(f"Status: {return_data['status'].replace('_', ' ').title()}")
     receipt.append("-" * 50)
     
     # Footer
@@ -3446,171 +3916,6 @@ def generate_return_receipt(return_data):
     receipt.append("=" * 50)
     
     return "\n".join(receipt)
-
-def print_receipt_page(receipt_text, receipt_title):
-    """Create a printable HTML page for the receipt"""
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{receipt_title}</title>
-        <style>
-            @media print {{
-                body {{
-                    font-family: 'Courier New', monospace;
-                    font-size: 12px;
-                    width: 80mm;
-                    margin: 0;
-                    padding: 10px;
-                    line-height: 1.2;
-                }}
-                .no-print {{
-                    display: none !important;
-                }}
-                .print-only {{
-                    display: block !important;
-                }}
-            }}
-            @media screen {{
-                body {{
-                    font-family: Arial, sans-serif;
-                    font-size: 14px;
-                    padding: 20px;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    background-color: #f5f5f5;
-                }}
-                .receipt-container {{
-                    background: white;
-                    padding: 30px;
-                    border-radius: 10px;
-                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-                    margin: 20px 0;
-                }}
-                .print-btn {{
-                    background-color: #4CAF50;
-                    color: white;
-                    padding: 15px 30px;
-                    border: none;
-                    border-radius: 8px;
-                    cursor: pointer;
-                    font-size: 18px;
-                    margin: 20px 0;
-                    width: 100%;
-                    transition: background-color 0.3s;
-                }}
-                .print-btn:hover {{
-                    background-color: #45a049;
-                    transform: translateY(-2px);
-                }}
-                .instructions {{
-                    background-color: #e8f5e8;
-                    padding: 15px;
-                    border-radius: 8px;
-                    margin: 20px 0;
-                    border-left: 4px solid #4CAF50;
-                }}
-                h1 {{
-                    color: #2c3e50;
-                    text-align: center;
-                    margin-bottom: 30px;
-                }}
-            }}
-            pre {{
-                white-space: pre-wrap;
-                word-wrap: break-word;
-                background-color: #f8f9fa;
-                padding: 20px;
-                border-radius: 5px;
-                border: 1px solid #ddd;
-            }}
-            .print-only {{
-                display: none;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="no-print">
-            <h1>🖨️ Print Your Receipt</h1>
-            
-            <div class="instructions">
-                <h3>How to print:</h3>
-                <ol>
-                    <li>Click the <strong>Print Receipt</strong> button below</li>
-                    <li>Or use your browser's print command:
-                        <ul>
-                            <li>Windows/Linux: <kbd>Ctrl</kbd> + <kbd>P</kbd></li>
-                            <li>Mac: <kbd>Cmd</kbd> + <kbd>P</kbd></li>
-                        </ul>
-                    </li>
-                    <li>Adjust print settings if needed</li>
-                    <li>Click Print</li>
-                </ol>
-            </div>
-            
-            <button class="print-btn" onclick="window.print()">
-                🖨️ Print Receipt Now
-            </button>
-        </div>
-        
-        <div class="receipt-container">
-            <pre>{receipt_text}</pre>
-        </div>
-        
-        <div class="no-print">
-            <button class="print-btn" onclick="window.print()">
-                🖨️ Print Receipt Now
-            </button>
-            
-            <div class="instructions">
-                <p><strong>Tip:</strong> For best results, use landscape orientation if your receipt is wide.</p>
-                <p>If printing doesn't work, use the download option in the main application.</p>
-            </div>
-        </div>
-        
-        <div class="print-only">
-            <p>Printed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        </div>
-    </body>
-    </html>
-    """
-    
-    # Create temporary directory if it doesn't exist
-    os.makedirs("print_cache", exist_ok=True)
-    
-    # Generate unique filename
-    timestamp = int(time.time())
-    filename = f"print_cache/receipt_{timestamp}.html"
-    
-    try:
-        # Save HTML file
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
-        # Open in new tab
-        js_code = f"""
-        <script>
-        function openPrintPage() {{
-            window.open('{filename}', '_blank', 'width=800,height=1000');
-        }}
-        openPrintPage();
-        </script>
-        """
-        
-        st.components.v1.html(js_code, height=0)
-        return True
-        
-    except Exception as e:
-        st.error(f"Error creating print page: {str(e)}")
-        # Fallback: show receipt in expander
-        with st.expander("Printing Failed - View Receipt Content"):
-            st.text(receipt_text)
-            st.info("Please use your browser's print function or the download option.")
-        return False
-
-# Initialize clipboard state
-if 'clipboard_text' not in st.session_state:
-    st.session_state.clipboard_text = ""
 
 # Purchase Orders Management
 # Constants (at the top of your file)
