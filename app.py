@@ -1016,6 +1016,63 @@ def pos_manual_mode():
     
     display_cart_and_checkout()
 def display_cart_and_checkout():
+    # Check if we just completed a sale and need to print
+    if st.session_state.get('just_completed_sale', False) and st.session_state.get('receipt_to_print'):
+        receipt_text = st.session_state.receipt_to_print
+        # Clear the state first
+        st.session_state.just_completed_sale = False
+        st.session_state.receipt_to_print = None
+        
+        # Use JavaScript to print the receipt
+        js_code = f"""
+        <script>
+        function printReceipt() {{
+            const printWindow = window.open('', '_blank', 'width=400,height=600');
+            const htmlContent = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Receipt</title>
+                <style>
+                    body {{
+                        font-family: 'Courier New', monospace;
+                        font-size: 12px;
+                        padding: 10px;
+                        line-height: 1.2;
+                        white-space: pre-wrap;
+                    }}
+                    @media print {{
+                        body {{
+                            margin: 0;
+                            padding: 10px;
+                        }}
+                    }}
+                </style>
+            </head>
+            <body>
+                <pre>{receipt_text}</pre>
+            </body>
+            </html>
+            `;
+            
+            printWindow.document.write(htmlContent);
+            printWindow.document.close();
+            
+            printWindow.onload = function() {{
+                printWindow.print();
+                setTimeout(() => printWindow.close(), 500);
+            }};
+        }}
+        
+        // Print immediately when page loads
+        window.onload = function() {{
+            setTimeout(printReceipt, 100);
+        }};
+        </script>
+        """
+        
+        st.components.v1.html(js_code, height=0)
+        return  # Early return to avoid showing the rest of the cart
     settings = load_data(SETTINGS_FILE)
     payment_charges = settings.get('payment_charges', {
         "cash": 0.0,
@@ -1389,9 +1446,12 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
         save_data(transactions, TRANSACTIONS_FILE)
         save_data(inventory, INVENTORY_FILE)
         
-        # Generate and print receipt
+        # Generate and print receipt - THIS IS THE KEY CHANGE
         receipt_text = generate_receipt(transaction)
-        print_receipt(receipt_text)
+        
+        # Store receipt in session state for printing after rerun
+        st.session_state.receipt_to_print = receipt_text
+        st.session_state.just_completed_sale = True
         
         # Open cash drawer if enabled
         if payment_method == "Cash":
@@ -1402,6 +1462,7 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
     except Exception as e:
         st.error(f"Error processing sale: {str(e)}")
         return False
+
 
 def generate_receipt(transaction):
     settings = load_data(SETTINGS_FILE)
