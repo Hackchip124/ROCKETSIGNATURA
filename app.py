@@ -792,21 +792,32 @@ def pos_terminal():
 def pos_scan_mode():
     products = load_data(PRODUCTS_FILE)
     inventory = load_data(INVENTORY_FILE)
-    settings = load_data(SETTINGS_FILE)
     
     st.header("Barcode Scan Mode")
     
-    # Barcode scanning section
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        search_term = st.text_input("Search Products (name or barcode)", key="scan_search")
-    with col2:
-        categories = load_data(CATEGORIES_FILE)
-        category_filter = st.selectbox("Filter by Category", [""] + categories.get('categories', []), key="scan_category")
-    with col3:
-        brands = load_data(BRANDS_FILE).get('brands', [])
-        brand_filter = st.selectbox("Filter by Brand", [""] + brands, key="scan_brand")
-        st.info("Use connected barcode scanner to scan products")
+    # Offer selection
+    offers = load_data(OFFERS_FILE)
+    active_offers = [o for o in offers.values() if o['active']]
+    
+    if active_offers:
+        st.subheader("🎁 Active Offers")
+        offer_options = {o['name']: o for o in active_offers}
+        
+        # Initialize selected_offer in session state if not exists
+        if 'selected_offer' not in st.session_state:
+            st.session_state.selected_offer = None
+            
+        selected_offer = st.selectbox(
+            "Select Offer to Apply", 
+            [""] + list(offer_options.keys()),
+            key="offer_select"
+        )
+        
+        # Store the selected offer in session state
+        st.session_state.selected_offer = selected_offer
+        
+        if selected_offer:
+            st.info(f"Selected: {offer_options[selected_offer]['description']}")
     
     # Check for barcode scanner input
     if st.session_state.scanner_status == "Connected":
@@ -828,86 +839,49 @@ def pos_scan_mode():
                             'brand': product.get('brand')
                         }
                     st.success(f"Added {product['name']} to cart")
+                    # Use a different approach to clear the input
+                    st.rerun()
                 else:
                     st.error(f"{product['name']} is out of stock")
             else:
                 st.error("Product not found with this barcode")
     
-    # Product search results
-    filtered_products = {}
-    for barcode, product in products.items():
-        # Check search term
-        matches_search = not search_term or (
-            search_term.lower() in product['name'].lower() or 
-            search_term.lower() in barcode.lower()
-        )
-        
-        # Check category filter
-        matches_category = not category_filter or product.get('category') == category_filter
-        
-        # Check brand filter
-        matches_brand = not brand_filter or product.get('brand') == brand_filter
-        
-        # Check stock
-        stock = inventory.get(barcode, {}).get('quantity', 0)
-        has_stock = stock > 0
-        
-        if matches_search and matches_category and matches_brand and has_stock:
-            filtered_products[barcode] = product
+    # Manual barcode entry as fallback
+    st.subheader("Manual Barcode Entry")
     
-    # Display products in a grid layout
-    st.subheader("Products")
-    if not filtered_products:
-        st.info("No products match your search criteria")
-    else:
-        cols_per_row = 4
-        product_list = list(filtered_products.items())
-        
-        for i in range(0, len(product_list), cols_per_row):
-            cols = st.columns(cols_per_row)
-            for col_idx in range(cols_per_row):
-                if i + col_idx < len(product_list):
-                    barcode, product = product_list[i + col_idx]
-                    with cols[col_idx]:
-                        with st.container():
-                            # Product image
-                            if 'image' in product and os.path.exists(product['image']):
-                                try:
-                                    img = Image.open(product['image'])
-                                    img.thumbnail((150, 150))
-                                    st.image(img, use_column_width=True)
-                                except:
-                                    pass
-                            
-                            # Product name and details
-                            st.subheader(product['name'][:20] + "..." if len(product['name']) > 20 else product['name'])
-                            st.text(f"Price: {format_currency(product['price'])}")
-                            
-                            # Stock status
-                            stock = inventory.get(barcode, {}).get('quantity', 0)
-                            status = "In Stock" if stock > 0 else "Out of Stock"
-                            color = "green" if stock > 0 else "red"
-                            st.markdown(f"Status: <span style='color:{color}'>{status}</span>", unsafe_allow_html=True)
-                            
-                            # Brand and category
-                            if product.get('brand'):
-                                st.text(f"Brand: {product['brand']}")
-                            if product.get('category'):
-                                st.text(f"Category: {product.get('category')}")
-                            
-                            # Add to cart button
-                            if st.button(f"Add to Cart", key=f"add_{barcode}", use_container_width=True):
-                                if barcode in st.session_state.cart:
-                                    st.session_state.cart[barcode]['quantity'] += 1
-                                else:
-                                    st.session_state.cart[barcode] = {
-                                        'name': product['name'],
-                                        'price': product['price'],
-                                        'quantity': 1,
-                                        'description': product.get('description', ''),
-                                        'brand': product.get('brand')
-                                    }
-                                st.success(f"Added {product['name']} to cart")
+    # Use a callback function to handle automatic addition
+    def handle_barcode_input():
+        manual_barcode = st.session_state.manual_barcode_input
+        if manual_barcode and manual_barcode in products:
+            product = products[manual_barcode]
+            stock = inventory.get(manual_barcode, {}).get('quantity', 0)
+            
+            if stock > 0:
+                if manual_barcode in st.session_state.cart:
+                    st.session_state.cart[manual_barcode]['quantity'] += 1
+                else:
+                    st.session_state.cart[manual_barcode] = {
+                        'name': product['name'],
+                        'price': product['price'],
+                        'quantity': 1,
+                        'description': product.get('description', ''),
+                        'brand': product.get('brand')
+                    }
+                st.success(f"Added {product['name']} to cart")
+                # Clear the input field by resetting the session state
+                st.session_state.manual_barcode_input = ""
+            else:
+                st.error(f"{product['name']} is out of stock")
+        elif manual_barcode:
+            st.error("Product not found with this barcode")
+    
+    # Text input with on_change callback
+    manual_barcode = st.text_input(
+        "Enter Barcode Manually", 
+        key="manual_barcode_input",
+        on_change=handle_barcode_input,
+        placeholder="Scan or type barcode and press Enter"
+    )
     
     # Display cart and checkout
     display_cart_and_checkout()
@@ -919,6 +893,18 @@ def pos_manual_mode():
     brands = load_data(BRANDS_FILE).get('brands', [])
     
     st.header("Manual Entry Mode")
+    
+    # Offer selection
+    offers = load_data(OFFERS_FILE)
+    active_offers = [o for o in offers.values() if o['active']]
+    
+    if active_offers:
+        st.subheader("🎁 Active Offers")
+        offer_options = {o['name']: o for o in active_offers}
+        selected_offer = st.selectbox("Select Offer to Apply", [""] + list(offer_options.keys()))
+        
+        if selected_offer:
+            st.info(f"Selected: {offer_options[selected_offer]['description']}")
     
     # Category, subcategory, and brand selection
     col1, col2, col3 = st.columns(3)
@@ -1042,6 +1028,14 @@ def display_cart_and_checkout():
     
     st.header("Current Sale")
     
+    # Initialize loyalty session state
+    if 'loyalty_customer_id' not in st.session_state:
+        st.session_state.loyalty_customer_id = None
+    if 'loyalty_points_to_redeem' not in st.session_state:
+        st.session_state.loyalty_points_to_redeem = 0
+    if 'loyalty_customer_data' not in st.session_state:
+        st.session_state.loyalty_customer_data = None
+    
     # Create a copy of the cart items to avoid modification during iteration
     cart_items = list(st.session_state.cart.items())
     items_to_remove = []
@@ -1081,10 +1075,29 @@ def display_cart_and_checkout():
         tax_rate = settings.get('tax_rate', 0.0)
         tax_amount = subtotal * tax_rate
         
-        # Apply offers before calculating total
+        # Calculate total before offers and payment charges
         total_before_offers = subtotal + tax_amount
-        total_after_offers = apply_offers_to_cart(st.session_state.cart, total_before_offers)
         
+        # Apply offers only if selected
+        offers = load_data(OFFERS_FILE)
+        active_offers = [o for o in offers.values() if o['active']]
+        
+        # Check if any offer is selected in the session state
+        selected_offer_name = st.session_state.get('selected_offer', None)
+        selected_offer = None
+        
+        if selected_offer_name:
+            for offer in active_offers:
+                if offer['name'] == selected_offer_name:
+                    selected_offer = offer
+                    break
+        
+        # Apply the selected offer if any
+        total_after_offers = total_before_offers
+        if selected_offer:
+            total_after_offers = apply_selected_offer(st.session_state.cart, total_before_offers, selected_offer)
+        
+        # Apply discounts
         discounts = load_data(DISCOUNTS_FILE)
         active_discounts = [d for d in discounts.values() if d['active']]
         
@@ -1104,7 +1117,93 @@ def display_cart_and_checkout():
                 final_total -= discount_amount
                 st.write(f"Discount Applied: -{format_currency(discount_amount)}")
         
+        # LOYALTY SECTION - Separate from the main sale processing
         st.markdown("---")
+        st.subheader("Loyalty Program")
+        
+        loyalty_data = load_data(LOYALTY_FILE)
+        customers = loyalty_data.get('customers', {})
+        
+        # Customer lookup form
+        with st.form("loyalty_lookup_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                customer_phone = st.text_input("Customer Phone", key="loyalty_phone_input")
+            with col2:
+                customer_id_input = st.text_input("Customer ID", key="customer_id_input")
+            
+            if st.form_submit_button("Find Customer", use_container_width=True):
+                customer_found = None
+                customer_id = None
+                
+                # Search by phone
+                if customer_phone:
+                    for cust_id, cust_data in customers.items():
+                        if cust_data.get('phone') == customer_phone:
+                            customer_found = cust_data
+                            customer_id = cust_id
+                            break
+                
+                # Search by ID
+                if not customer_found and customer_id_input and customer_id_input in customers:
+                    customer_found = customers[customer_id_input]
+                    customer_id = customer_id_input
+                
+                if customer_found:
+                    st.session_state.loyalty_customer_id = customer_id
+                    st.session_state.loyalty_customer_data = customer_found
+                    st.success(f"Customer found: {customer_found.get('name', 'Unknown')}")
+                else:
+                    st.session_state.loyalty_customer_id = None
+                    st.session_state.loyalty_customer_data = None
+                    st.warning("Customer not found")
+        
+        # Display customer info if found
+        if st.session_state.loyalty_customer_data:
+            customer = st.session_state.loyalty_customer_data
+            st.info(f"**{customer.get('name', 'Unknown')}** - {customer.get('tier', 'Bronze')} Tier")
+            st.info(f"Points: {customer.get('points', 0)}")
+            
+            # Points redemption
+            max_points_to_redeem = customer.get('points', 0)
+            points_value = loyalty_data.get('settings', {}).get('points_value', 0.01)
+            
+            if max_points_to_redeem > 0:
+                st.session_state.loyalty_points_to_redeem = st.number_input(
+                    "Points to redeem", 
+                    min_value=0, 
+                    max_value=min(max_points_to_redeem, int(final_total / points_value)),
+                    value=st.session_state.loyalty_points_to_redeem,
+                    step=10,
+                    key="points_redeem_input"
+                )
+                
+                if st.session_state.loyalty_points_to_redeem > 0:
+                    points_discount = st.session_state.loyalty_points_to_redeem * points_value
+                    final_total -= points_discount
+                    st.success(f"Redeeming {st.session_state.loyalty_points_to_redeem} points: -{format_currency(points_discount)}")
+        
+        # Calculate loyalty points to earn (for display only)
+        if st.session_state.loyalty_customer_id:
+            points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
+            loyalty_points_earned = int(final_total * points_per_dollar)
+            st.info(f"Points to earn: {loyalty_points_earned}")
+        
+        # Apply tier discount if customer has a tier
+        loyalty_discount_applied = 0
+        if st.session_state.loyalty_customer_data:
+            current_tier = st.session_state.loyalty_customer_data.get('tier', 'Bronze')
+            tier_settings = loyalty_data.get('tiers', {}).get(current_tier, {})
+            tier_discount = tier_settings.get('discount', 0)
+            
+            if tier_discount > 0:
+                loyalty_discount_applied = final_total * tier_discount
+                final_total -= loyalty_discount_applied
+                st.success(f"Tier discount ({current_tier}): -{format_currency(loyalty_discount_applied)}")
+        
+        st.markdown("---")
+        
+        # PAYMENT SECTION
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Summary")
@@ -1114,6 +1213,8 @@ def display_cart_and_checkout():
                 st.write(f"After Offers: {format_currency(total_after_offers)}")
             if final_total != total_after_offers:
                 st.write(f"After Discount: {format_currency(final_total)}")
+            if loyalty_discount_applied > 0:
+                st.write(f"Loyalty Discount: -{format_currency(loyalty_discount_applied)}")
             st.write(f"**Total: {format_currency(final_total)}**")
         
         with col2:
@@ -1134,128 +1235,173 @@ def display_cart_and_checkout():
             
             amount_tendered = st.number_input("Amount Tendered", min_value=0.0, value=total_with_payment_charge, step=1.0)
             
-            if st.button("Complete Sale", use_container_width=True):
+            if st.button("Complete Sale", type="primary", use_container_width=True):
                 if amount_tendered < total_with_payment_charge:
                     st.error("Amount tendered is less than total")
                 else:
-                    transactions = load_data(TRANSACTIONS_FILE)
-                    transaction_id = generate_short_id()
+                    # Process the sale
+                    success = process_sale(
+                        st.session_state.cart,
+                        payment_method,
+                        payment_charge_percent,
+                        payment_charge_amount,
+                        amount_tendered,
+                        selected_offer,
+                        st.session_state.loyalty_customer_id,
+                        st.session_state.loyalty_points_to_redeem,
+                        loyalty_discount_applied
+                    )
                     
-                    transactions[transaction_id] = {
-                        'transaction_id': transaction_id,
-                        'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
-                        'items': st.session_state.cart.copy(),
-                        'subtotal': subtotal,
-                        'tax': tax_amount,
-                        'discount': final_total - (subtotal + tax_amount),
-                        'total': final_total,
-                        'payment_method': payment_method,
-                        'payment_charge_percent': payment_charge_percent,
-                        'payment_charge_amount': payment_charge_amount,
-                        'amount_tendered': amount_tendered,
-                        'change': amount_tendered - total_with_payment_charge,
-                        'cashier': st.session_state.user_info['username'],
-                        'shift_id': st.session_state.shift_id if is_cashier() else None
-                    }
-                    
-                    inventory = load_data(INVENTORY_FILE)
-                    for barcode, item in st.session_state.cart.items():
-                        if barcode in inventory:
-                            inventory[barcode]['quantity'] -= item['quantity']
-                        else:
-                            inventory[barcode] = {'quantity': -item['quantity']}
-                    
-                    save_data(transactions, TRANSACTIONS_FILE)
-                    save_data(inventory, INVENTORY_FILE)
-                    
-                    receipt = generate_receipt(transactions[transaction_id])
-                    st.subheader("Receipt")
-                    st.text(receipt)
-                    
-                    if print_receipt(receipt):
-                        st.success("Receipt printed successfully")
-                    else:
-                        st.warning("Receipt could not be printed automatically")
-                    
-                    if payment_method == "Cash" and settings.get('cash_drawer_enabled', False):
-                        open_cash_drawer()
-                    
-                    st.session_state.cart = {}
-                    st.success("Sale completed successfully!")
+                    if success:
+                        st.success("Sale completed successfully!")
+                        # Reset cart and loyalty state
+                        st.session_state.cart = {}
+                        st.session_state.selected_offer = None
+                        st.session_state.loyalty_customer_id = None
+                        st.session_state.loyalty_points_to_redeem = 0
+                        st.session_state.loyalty_customer_data = None
+                        st.rerun()
                     
     else:
         st.info("Cart is empty")
 
-# Also fix the apply_offers_to_cart function to avoid iteration issues
-def apply_offers_to_cart(cart_items, current_total):
-    """
-    Apply active offers to the cart and return the updated total
-    """
-    offers = load_data(OFFERS_FILE)
-    active_offers = [o for o in offers.values() if o['active']]
-    
-    total_after_offers = current_total
-    applied_offers = []
-    
-    for offer in active_offers:
-        if offer['type'] == 'bogo':
-            # Buy One Get One Free offer
-            for barcode, item in cart_items.items():  # This is safe because we're not modifying the cart
-                if barcode in offer.get('products', []):
-                    if item['quantity'] >= offer['buy_quantity']:
-                        free_qty = (item['quantity'] // offer['buy_quantity']) * offer['get_quantity']
-                        discount_amount = free_qty * item['price']
-                        total_after_offers -= discount_amount
-                        applied_offers.append({
-                            'type': 'bogo',
-                            'name': offer['name'],
-                            'product': item['name'],
-                            'discount': discount_amount
-                        })
+def process_sale(cart_items, payment_method, payment_charge_percent, payment_charge_amount, amount_tendered, selected_offer=None, customer_id=None, points_to_redeem=0, loyalty_discount=0):
+    try:
+        # Load necessary data
+        products = load_data(PRODUCTS_FILE)
+        inventory = load_data(INVENTORY_FILE)
+        transactions = load_data(TRANSACTIONS_FILE)
+        loyalty_data = load_data(LOYALTY_FILE)
+        customers = loyalty_data.get('customers', {})
         
-        elif offer['type'] == 'bundle':
-            # Bundle offer - check if all bundle products are in cart
-            bundle_products = offer.get('products', [])
-            if all(barcode in cart_items for barcode in bundle_products):
-                bundle_price = offer.get('bundle_price', 0)
-                original_price = sum(cart_items[barcode]['price'] * cart_items[barcode]['quantity'] 
-                                   for barcode in bundle_products)
-                discount_amount = original_price - bundle_price
-                total_after_offers -= discount_amount
-                applied_offers.append({
-                    'type': 'bundle',
-                    'name': offer['name'],
-                    'discount': discount_amount
-                })
+        # Calculate totals
+        subtotal = sum(item['price'] * item['quantity'] for item in cart_items.values())
+        tax_rate = load_data(SETTINGS_FILE).get('tax_rate', 0.0)
+        tax_amount = subtotal * tax_rate
+        total = subtotal + tax_amount
         
-        elif offer['type'] == 'special_price':
-            # Special price offer
-            product_barcode = offer.get('product')
-            if product_barcode in cart_items:
-                special_price = offer.get('special_price', 0)
-                original_price = cart_items[product_barcode]['price']
-                quantity = cart_items[product_barcode]['quantity']
-                discount_amount = (original_price - special_price) * quantity
-                total_after_offers -= discount_amount
-                applied_offers.append({
-                    'type': 'special_price',
-                    'name': offer['name'],
-                    'product': cart_items[product_barcode]['name'],
-                    'discount': discount_amount
-                })
-    
-    # Display applied offers
-    if applied_offers:
-        st.subheader("🎁 Applied Offers")
-        for offer in applied_offers:
-            if offer['type'] == 'bogo':
-                st.success(f"{offer['name']}: -{format_currency(offer['discount'])}")
-            elif offer['type'] == 'bundle':
-                st.success(f"{offer['name']}: -{format_currency(offer['discount'])}")
-            elif offer['type'] == 'special_price':
-                st.success(f"{offer['name']} on {offer['product']}: -{format_currency(offer['discount'])}")
-    
-    return max(total_after_offers, 0)  # Ensure total doesn't go negative
+        # Apply discount if any
+        discount_amount = 0
+        if selected_offer:
+            # Handle offer discount (this would be calculated based on the offer type)
+            pass
+        
+        # Apply loyalty discount
+        total -= loyalty_discount
+        
+        # Apply points redemption
+        points_value = loyalty_data.get('settings', {}).get('points_value', 0.01)
+        points_discount = points_to_redeem * points_value
+        total -= points_discount
+        
+        # Add payment charge
+        total_with_charge = total + payment_charge_amount
+        change = amount_tendered - total_with_charge
+        
+        # Generate transaction ID
+        transaction_id = generate_short_id()
+        
+        # Calculate loyalty points to earn
+        loyalty_points_earned = 0
+        if customer_id:
+            points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
+            loyalty_points_earned = int(total * points_per_dollar)
+        
+        # Create transaction record
+        transaction = {
+            'transaction_id': transaction_id,
+            'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+            'cashier': st.session_state.user_info['username'],
+            'items': cart_items.copy(),
+            'subtotal': subtotal,
+            'tax': tax_amount,
+            'discount': discount_amount,
+            'loyalty_discount': loyalty_discount,
+            'points_discount': points_discount,
+            'total': total,
+            'payment_method': payment_method,
+            'payment_charge_percent': payment_charge_percent,
+            'payment_charge_amount': payment_charge_amount,
+            'amount_tendered': amount_tendered,
+            'change': change,
+            'shift_id': st.session_state.shift_id if st.session_state.shift_started else None,
+            'customer_id': customer_id,
+            'loyalty_points_earned': loyalty_points_earned,
+            'loyalty_points_redeemed': points_to_redeem
+        }
+        
+        # Add offer information if applied
+        if selected_offer:
+            transaction['applied_offer'] = selected_offer['name']
+        
+        # Update inventory
+        for barcode, item in cart_items.items():
+            if barcode in inventory:
+                inventory[barcode]['quantity'] -= item['quantity']
+                inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                inventory[barcode]['updated_by'] = st.session_state.user_info['username']
+            else:
+                st.error(f"Product {barcode} not found in inventory")
+                return False
+        
+        # Update loyalty points
+        if customer_id and customer_id in customers:
+            # Calculate net points change
+            net_points_change = loyalty_points_earned - points_to_redeem
+            customers[customer_id]['points'] = customers[customer_id].get('points', 0) + net_points_change
+            customers[customer_id]['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Check for tier upgrade
+            current_points = customers[customer_id]['points']
+            current_tier = customers[customer_id].get('tier', 'Bronze')
+            
+            # Check all tiers to see if customer qualifies for upgrade
+            tiers = loyalty_data.get('tiers', {})
+            new_tier = current_tier
+            for tier_name, tier_data in tiers.items():
+                if current_points >= tier_data.get('min_points', 0):
+                    # Check if this tier is higher than current
+                    tier_order = list(tiers.keys())
+                    if tier_order.index(tier_name) > tier_order.index(current_tier):
+                        new_tier = tier_name
+            
+            if new_tier != current_tier:
+                customers[customer_id]['tier'] = new_tier
+            
+            loyalty_data['customers'] = customers
+            save_data(loyalty_data, LOYALTY_FILE)
+        
+        # Update cash drawer if payment is cash
+        if payment_method == "Cash" and st.session_state.shift_started:
+            cash_drawer = load_data(CASH_DRAWER_FILE)
+            cash_drawer['current_balance'] += total_with_charge
+            cash_drawer['transactions'].append({
+                'type': 'sale',
+                'amount': total_with_charge,
+                'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                'transaction_id': transaction_id,
+                'processed_by': st.session_state.user_info['username']
+            })
+            save_data(cash_drawer, CASH_DRAWER_FILE)
+        
+        # Save all changes
+        transactions[transaction_id] = transaction
+        save_data(transactions, TRANSACTIONS_FILE)
+        save_data(inventory, INVENTORY_FILE)
+        
+        # Generate and print receipt
+        receipt_text = generate_receipt(transaction)
+        print_receipt(receipt_text)
+        
+        # Open cash drawer if enabled
+        if payment_method == "Cash":
+            open_cash_drawer()
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error processing sale: {str(e)}")
+        return False
 
 def generate_receipt(transaction):
     settings = load_data(SETTINGS_FILE)
@@ -1274,6 +1420,15 @@ def generate_receipt(transaction):
     receipt += f"Date: {transaction['date']}\n"
     receipt += f"Cashier: {transaction['cashier']}\n"
     receipt += f"Transaction ID: {transaction['transaction_id']}\n"
+    
+    # Customer info if available
+    if transaction.get('customer_id'):
+        loyalty_data = load_data(LOYALTY_FILE)
+        customer = loyalty_data.get('customers', {}).get(transaction['customer_id'], {})
+        if customer:
+            receipt += f"Customer: {customer.get('name', 'N/A')}\n"
+            receipt += f"Loyalty ID: {transaction['customer_id']}\n"
+    
     receipt += "=" * 40 + "\n"
     
     # Items
@@ -1284,11 +1439,21 @@ def generate_receipt(transaction):
     receipt += f"Subtotal: {format_currency(transaction['subtotal'])}\n"
     receipt += f"Tax: {format_currency(transaction['tax'])}\n"
     
-    # Show offers/discounts if any
+    # Discounts
     if transaction.get('discount', 0) != 0:
         receipt += f"Discount: -{format_currency(abs(transaction['discount']))}\n"
     
+    if transaction.get('loyalty_discount', 0) != 0:
+        receipt += f"Loyalty Discount: -{format_currency(abs(transaction['loyalty_discount']))}\n"
+    
     receipt += f"Total: {format_currency(transaction['total'])}\n"
+    
+    # Loyalty points
+    if transaction.get('loyalty_points_earned', 0) > 0:
+        receipt += f"Loyalty Points Earned: +{transaction['loyalty_points_earned']}\n"
+    
+    if transaction.get('loyalty_points_redeemed', 0) > 0:
+        receipt += f"Loyalty Points Redeemed: -{transaction['loyalty_points_redeemed']}\n"
     
     # Show payment charge if any
     if transaction.get('payment_charge_amount', 0) > 0:
@@ -1300,6 +1465,14 @@ def generate_receipt(transaction):
     receipt += f"Change: {format_currency(transaction['change'])}\n"
     receipt += "=" * 40 + "\n"
     
+    # Loyalty summary
+    if transaction.get('customer_id'):
+        loyalty_data = load_data(LOYALTY_FILE)
+        customer = loyalty_data.get('customers', {}).get(transaction['customer_id'], {})
+        if customer:
+            receipt += f"Total Points: {customer.get('points', 0)}\n"
+            receipt += f"Tier: {customer.get('tier', 'Bronze')}\n"
+    
     if settings.get('receipt_footer', ''):
         receipt += f"{settings['receipt_footer']}\n"
         receipt += "=" * 40 + "\n"
@@ -1307,6 +1480,123 @@ def generate_receipt(transaction):
     receipt += "Thank you for shopping with us!\n"
     
     return receipt
+
+# Add this function to initialize loyalty settings if they don't exist
+def initialize_loyalty_settings():
+    loyalty_data = load_data(LOYALTY_FILE)
+    
+    if 'settings' not in loyalty_data:
+        loyalty_data['settings'] = {
+            'points_per_dollar': 1,  # 1 point per $1 spent
+            'points_value': 0.01,    # 1 point = $0.01
+            'signup_bonus': 100,     # 100 points for signing up
+            'min_redemption': 100,   # Minimum 100 points to redeem
+            'points_expiry_days': 365  # Points expire after 1 year
+        }
+    
+    if 'tiers' not in loyalty_data:
+        loyalty_data['tiers'] = {
+            'Bronze': {
+                'min_points': 0,
+                'discount': 0.0,
+                'benefits': ['Basic rewards']
+            },
+            'Silver': {
+                'min_points': 1000,
+                'discount': 0.05,  # 5% discount
+                'benefits': ['5% discount', 'Early access to sales']
+            },
+            'Gold': {
+                'min_points': 5000,
+                'discount': 0.10,  # 10% discount
+                'benefits': ['10% discount', 'Free delivery', 'Birthday rewards']
+            },
+            'Platinum': {
+                'min_points': 10000,
+                'discount': 0.15,  # 15% discount
+                'benefits': ['15% discount', 'Personal shopper', 'VIP events']
+            }
+        }
+    
+    save_data(loyalty_data, LOYALTY_FILE)
+
+# Call this function during initialization
+initialize_loyalty_settings()
+def apply_selected_offer(cart_items, current_total, offer):
+    """
+    Apply a specific selected offer to the cart
+    """
+    products = load_data(PRODUCTS_FILE)
+    total_after_offer = current_total
+    
+    if offer['type'] == 'bogo':
+        # Buy One Get One Free offer
+        for barcode, item in cart_items.items():
+            if barcode in offer.get('products', []):
+                if item['quantity'] >= offer['buy_quantity']:
+                    free_qty = (item['quantity'] // offer['buy_quantity']) * offer['get_quantity']
+                    discount_amount = free_qty * item['price']
+                    total_after_offer -= discount_amount
+    
+    elif offer['type'] == 'bundle':
+        # Bundle offer - check if all bundle products are in cart
+        bundle_products = offer.get('products', [])
+        if all(barcode in cart_items for barcode in bundle_products):
+            bundle_price = offer.get('bundle_price', 0)
+            original_price = sum(cart_items[barcode]['price'] * cart_items[barcode]['quantity'] 
+                               for barcode in bundle_products)
+            discount_amount = original_price - bundle_price
+            total_after_offer -= discount_amount
+    
+    elif offer['type'] == 'special_price':
+        # Special price offer
+        product_barcode = offer.get('product')
+        if product_barcode in cart_items:
+            special_price = offer.get('special_price', 0)
+            original_price = cart_items[product_barcode]['price']
+            quantity = cart_items[product_barcode]['quantity']
+            discount_amount = (original_price - special_price) * quantity
+            total_after_offer -= discount_amount
+    
+    elif offer['type'] == 'percentage_discount':
+        # Percentage discount offer
+        discount_percent = offer.get('discount_percent', 0) / 100
+        applicable_products = []
+        
+        if offer.get('apply_to_all', False):
+            # Apply to all products
+            applicable_products = list(cart_items.keys())
+        else:
+            # Apply to specific products
+            applicable_products = offer.get('products', [])
+        
+        for barcode in applicable_products:
+            if barcode in cart_items:
+                item = cart_items[barcode]
+                discount_amount = item['price'] * item['quantity'] * discount_percent
+                total_after_offer -= discount_amount
+    
+    elif offer['type'] == 'fixed_discount':
+        # Fixed amount discount offer
+        discount_amount_per_item = offer.get('discount_amount', 0)
+        applicable_products = []
+        
+        if offer.get('apply_to_all', False):
+            # Apply to all products
+            applicable_products = list(cart_items.keys())
+        else:
+            # Apply to specific products
+            applicable_products = offer.get('products', [])
+        
+        for barcode in applicable_products:
+            if barcode in cart_items:
+                item = cart_items[barcode]
+                total_discount = discount_amount_per_item * item['quantity']
+                total_after_offer -= total_discount
+    
+    return max(total_after_offer, 0)  # Ensure total doesn't go negative
+
+
 # Outdoor Sales Module
 # Outdoor Sales Module - Fixed without rerun
 def outdoor_sales_portal():
@@ -5790,94 +6080,204 @@ def discounts_management():
 
 
 # Offers Management
+# Offers Management - Improved with proper BOGO functionality and error handling
 def offers_management():
     if not is_manager():
         st.warning("You don't have permission to access this page")
         return
     
-    st.title("Offers Management")
+    st.title("🎁 Offers Management")
     
-    tab1, tab2, tab3 = st.tabs(["Add Offer", "View/Edit Offers", "Bulk Import"])
+    tab1, tab2, tab3 = st.tabs(["➕ Add Offer", "👀 View/Edit Offers", "📤 Bulk Import"])
     
     with tab1:
         st.header("Add New Offer")
         
-        with st.form("add_offer_form"):
-            name = st.text_input("Offer Name*")
-            description = st.text_area("Description")
+        with st.form("add_offer_form", clear_on_submit=True):
+            name = st.text_input("Offer Name*", help="Give your offer a descriptive name")
+            description = st.text_area("Description", help="Describe the offer for customers and staff")
             
-            offer_type = st.selectbox("Offer Type*", ["BOGO", "Bundle", "Special Price"])
+            offer_type = st.selectbox("Offer Type*", 
+                                    ["BOGO", "Bundle", "Special Price", "Percentage Discount", "Fixed Discount"],
+                                    help="Select the type of offer to create")
             
+            # BOGO Offer Configuration
             if offer_type == "BOGO":
                 col1, col2 = st.columns(2)
                 with col1:
-                    buy_quantity = st.number_input("Buy Quantity*", min_value=1, value=1, step=1)
+                    buy_quantity = st.number_input("Buy Quantity*", min_value=1, value=1, step=1,
+                                                 help="Number of items customer needs to buy")
                 with col2:
-                    get_quantity = st.number_input("Get Quantity Free*", min_value=1, value=1, step=1)
+                    get_quantity = st.number_input("Get Quantity Free*", min_value=1, value=1, step=1,
+                                                  help="Number of items customer gets free")
                 
                 products = load_data(PRODUCTS_FILE)
-                product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-                selected_products = st.multiselect("Select Products*", list(product_options.keys()))
+                if not products:
+                    st.warning("No products available. Please add products first.")
+                else:
+                    product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
+                    selected_products = st.multiselect("Select Products*", list(product_options.keys()),
+                                                     help="Products this BOGO offer applies to")
             
+            # Bundle Offer Configuration
             elif offer_type == "Bundle":
                 products = load_data(PRODUCTS_FILE)
-                product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-                selected_products = st.multiselect("Select Bundle Products*", list(product_options.keys()), max_selections=5)
-                bundle_price = st.number_input("Bundle Price*", min_value=0.01, value=0.0, step=1.0)
+                if not products:
+                    st.warning("No products available. Please add products first.")
+                else:
+                    product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
+                    selected_products = st.multiselect("Select Bundle Products*", list(product_options.keys()), 
+                                                     max_selections=5, help="Products included in this bundle")
+                    
+                    if selected_products:
+                        # Calculate original total price
+                        original_total = sum(products[product_options[p]].get('price', 0) for p in selected_products)
+                        st.info(f"Original total price: {format_currency(original_total)}")
+                        
+                        bundle_price = st.number_input("Bundle Price*", min_value=0.01, value=original_total * 0.8, 
+                                                     step=0.01, help="Special price for the bundle")
+                        
+                        discount_amount = original_total - bundle_price
+                        discount_percent = (discount_amount / original_total) * 100 if original_total > 0 else 0
+                        st.success(f"Discount: {format_currency(discount_amount)} ({discount_percent:.1f}% off)")
             
+            # Special Price Offer Configuration
             elif offer_type == "Special Price":
                 products = load_data(PRODUCTS_FILE)
-                product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-                selected_product = st.selectbox("Select Product*", [""] + list(product_options.keys()))
-                special_price = st.number_input("Special Price*", min_value=0.01, value=0.0, step=1.0)
+                if not products:
+                    st.warning("No products available. Please add products first.")
+                else:
+                    product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
+                    selected_product = st.selectbox("Select Product*", [""] + list(product_options.keys()))
+                    
+                    if selected_product:
+                        barcode = product_options[selected_product]
+                        product = products[barcode]
+                        original_price = product.get('price', 0)
+                        
+                        special_price = st.number_input("Special Price*", min_value=0.01, value=original_price * 0.9, 
+                                                       step=0.01, help="Temporary special price for this product")
+                        
+                        discount_amount = original_price - special_price
+                        discount_percent = (discount_amount / original_price) * 100 if original_price > 0 else 0
+                        st.success(f"Discount: {format_currency(discount_amount)} ({discount_percent:.1f}% off)")
             
+            # Percentage Discount Offer Configuration
+            elif offer_type == "Percentage Discount":
+                discount_percent = st.number_input("Discount Percentage*", min_value=1, max_value=100, value=10, 
+                                                  step=1, help="Percentage discount to apply")
+                
+                products = load_data(PRODUCTS_FILE)
+                if not products:
+                    st.warning("No products available. Please add products first.")
+                else:
+                    product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
+                    selected_products = st.multiselect("Select Products*", list(product_options.keys()),
+                                                     help="Products this discount applies to")
+            
+            # Fixed Discount Offer Configuration
+            elif offer_type == "Fixed Discount":
+                discount_amount = st.number_input("Discount Amount*", min_value=0.01, value=1.0, 
+                                                 step=0.01, help="Fixed amount to discount")
+                
+                products = load_data(PRODUCTS_FILE)
+                if not products:
+                    st.warning("No products available. Please add products first.")
+                else:
+                    product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
+                    selected_products = st.multiselect("Select Products*", list(product_options.keys()),
+                                                     help="Products this discount applies to")
+            
+            # Date Range for Offer
+            st.subheader("Offer Validity")
             col1, col2 = st.columns(2)
             with col1:
                 start_date = st.date_input("Start Date*", value=datetime.date.today())
             with col2:
                 end_date = st.date_input("End Date*", value=datetime.date.today() + datetime.timedelta(days=7))
             
-            active = st.checkbox("Active", value=True)
+            # Additional Options
+            st.subheader("Additional Options")
+            active = st.checkbox("Active", value=True, help="Enable/disable this offer")
+            apply_to_all = st.checkbox("Apply to All Products", value=False, 
+                                     help="Apply this offer to all products (overrides product selection)")
             
-            submit_button = st.form_submit_button("Add Offer")
+            submit_button = st.form_submit_button("➕ Add Offer")
             
             if submit_button:
+                # Validation
+                errors = []
+                
                 if not name:
-                    st.error("Offer name is required")
-                elif offer_type in ["BOGO", "Bundle"] and not selected_products:
-                    st.error("Please select at least one product")
-                elif offer_type == "Special Price" and not selected_product:
-                    st.error("Please select a product")
+                    errors.append("Offer name is required")
+                
+                if offer_type in ["BOGO", "Bundle", "Percentage Discount", "Fixed Discount"] and not apply_to_all:
+                    if offer_type == "BOGO" and not selected_products:
+                        errors.append("Please select at least one product for BOGO offer")
+                    elif offer_type == "Bundle" and not selected_products:
+                        errors.append("Please select bundle products")
+                    elif offer_type in ["Percentage Discount", "Fixed Discount"] and not selected_products:
+                        errors.append("Please select products for discount")
+                
+                if offer_type == "Special Price" and not selected_product:
+                    errors.append("Please select a product for special pricing")
+                
+                if end_date < start_date:
+                    errors.append("End date cannot be before start date")
+                
+                if errors:
+                    for error in errors:
+                        st.error(error)
                 else:
                     offers = load_data(OFFERS_FILE)
-                    offer_id = str(uuid.uuid4())
+                    offer_id = f"offer_{generate_short_id()}"
                     
                     offer_data = {
                         'id': offer_id,
                         'name': name,
                         'description': description,
-                        'type': offer_type.lower(),
+                        'type': offer_type.lower().replace(' ', '_'),
                         'start_date': start_date.strftime("%Y-%m-%d"),
                         'end_date': end_date.strftime("%Y-%m-%d"),
                         'active': active,
+                        'apply_to_all': apply_to_all,
                         'created_by': st.session_state.user_info['username'],
-                        'created_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                        'created_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                        'updated_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
                     }
                     
+                    # Add type-specific data
                     if offer_type == "BOGO":
                         offer_data['buy_quantity'] = buy_quantity
                         offer_data['get_quantity'] = get_quantity
-                        offer_data['products'] = [product_options[p] for p in selected_products]
+                        if not apply_to_all:
+                            offer_data['products'] = [product_options[p] for p in selected_products]
+                    
                     elif offer_type == "Bundle":
-                        offer_data['products'] = [product_options[p] for p in selected_products]
                         offer_data['bundle_price'] = bundle_price
+                        if not apply_to_all:
+                            offer_data['products'] = [product_options[p] for p in selected_products]
+                    
                     elif offer_type == "Special Price":
                         offer_data['product'] = product_options[selected_product]
                         offer_data['special_price'] = special_price
                     
+                    elif offer_type == "Percentage Discount":
+                        offer_data['discount_percent'] = discount_percent
+                        if not apply_to_all:
+                            offer_data['products'] = [product_options[p] for p in selected_products]
+                    
+                    elif offer_type == "Fixed Discount":
+                        offer_data['discount_amount'] = discount_amount
+                        if not apply_to_all:
+                            offer_data['products'] = [product_options[p] for p in selected_products]
+                    
+                    # Save offer
                     offers[offer_id] = offer_data
                     save_data(offers, OFFERS_FILE)
-                    st.success("Offer added successfully")
+                    
+                    st.success(f"✅ Offer '{name}' added successfully!")
+                    st.balloons()
     
     with tab2:
         st.header("View/Edit Offers")
@@ -5886,224 +6286,607 @@ def offers_management():
         products = load_data(PRODUCTS_FILE)
         
         if not offers:
-            st.info("No offers available")
+            st.info("No offers available. Create your first offer above!")
         else:
-            for offer_id, offer in offers.items():
-                with st.expander(f"{offer['name']} - {'Active' if offer['active'] else 'Inactive'}"):
-                    with st.form(key=f"edit_{offer_id}"):
-                        name = st.text_input("Name", value=offer.get('name', ''))
-                        description = st.text_area("Description", value=offer.get('description', ''))
+            # Filter options
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                status_filter = st.selectbox("Filter by Status", ["All", "Active", "Inactive"])
+            with col2:
+                type_filter = st.selectbox("Filter by Type", ["All"] + list(set(o['type'].replace('_', ' ').title() for o in offers.values())))
+            with col3:
+                search_term = st.text_input("Search Offers", placeholder="Search by name...")
+            
+            # Apply filters
+            filtered_offers = offers.copy()
+            
+            if status_filter != "All":
+                active_status = status_filter == "Active"
+                filtered_offers = {k: v for k, v in filtered_offers.items() if v['active'] == active_status}
+            
+            if type_filter != "All":
+                type_key = type_filter.lower().replace(' ', '_')
+                filtered_offers = {k: v for k, v in filtered_offers.items() if v['type'] == type_key}
+            
+            if search_term:
+                filtered_offers = {k: v for k, v in filtered_offers.items() if search_term.lower() in v['name'].lower()}
+            
+            if not filtered_offers:
+                st.info("No offers match the selected filters")
+            else:
+                st.write(f"**Found {len(filtered_offers)} offer(s)**")
+                
+                for offer_id, offer in filtered_offers.items():
+                    # Determine offer status badge
+                    current_date = datetime.date.today()
+                    start_date = datetime.datetime.strptime(offer['start_date'], "%Y-%m-%d").date()
+                    end_date = datetime.datetime.strptime(offer['end_date'], "%Y-%m-%d").date()
+                    
+                    status_badge = ""
+                    if not offer['active']:
+                        status_badge = "🔴 Inactive"
+                    elif current_date < start_date:
+                        status_badge = "⏳ Upcoming"
+                    elif current_date > end_date:
+                        status_badge = "⌛ Expired"
+                    else:
+                        status_badge = "✅ Active"
+                    
+                    with st.expander(f"{offer['name']} - {offer['type'].replace('_', ' ').title()} - {status_badge}"):
+                        col1, col2 = st.columns(2)
                         
-                        offer_type = st.selectbox("Type", 
-                                                ["BOGO", "Bundle", "Special Price"], 
-                                                index=["BOGO", "Bundle", "Special Price"].index(offer['type'].title()))
+                        with col1:
+                            st.write(f"**Description:** {offer.get('description', 'No description')}")
+                            st.write(f"**Type:** {offer['type'].replace('_', ' ').title()}")
+                            st.write(f"**Valid:** {offer['start_date']} to {offer['end_date']}")
+                            st.write(f"**Status:** {'Active' if offer['active'] else 'Inactive'}")
+                            st.write(f"**Apply to All:** {'Yes' if offer.get('apply_to_all', False) else 'No'}")
+                            
+                            # Show type-specific details
+                            if offer['type'] == 'bogo':
+                                st.write(f"**Buy:** {offer.get('buy_quantity', 1)} Get: {offer.get('get_quantity', 1)} Free")
+                            elif offer['type'] == 'bundle':
+                                st.write(f"**Bundle Price:** {format_currency(offer.get('bundle_price', 0))}")
+                            elif offer['type'] == 'special_price':
+                                st.write(f"**Special Price:** {format_currency(offer.get('special_price', 0))}")
+                            elif offer['type'] == 'percentage_discount':
+                                st.write(f"**Discount:** {offer.get('discount_percent', 0)}%")
+                            elif offer['type'] == 'fixed_discount':
+                                st.write(f"**Discount:** {format_currency(offer.get('discount_amount', 0))}")
                         
-                        if offer['type'] == "bogo":
+                        with col2:
+                            # Show products if not applying to all
+                            if not offer.get('apply_to_all', False):
+                                st.write("**Applied to:**")
+                                if offer['type'] == 'special_price':
+                                    product_id = offer.get('product')
+                                    if product_id and product_id in products:
+                                        st.write(f"- {products[product_id].get('name', 'Unknown')} ({product_id})")
+                                    else:
+                                        st.warning("Product not found")
+                                else:
+                                    product_ids = offer.get('products', [])
+                                    for pid in product_ids:
+                                        if pid in products:
+                                            st.write(f"- {products[pid].get('name', 'Unknown')} ({pid})")
+                                        else:
+                                            st.warning(f"Product {pid} not found")
+                            
+                            st.write(f"**Created by:** {offer.get('created_by', 'Unknown')}")
+                            st.write(f"**Created at:** {offer.get('created_at', 'Unknown')}")
+                            st.write(f"**Last updated:** {offer.get('updated_at', 'Unknown')}")
+                        
+                        # Edit form
+                        with st.form(key=f"edit_{offer_id}"):
+                            st.subheader("Edit Offer")
+                            
+                            edit_name = st.text_input("Name", value=offer.get('name', ''))
+                            edit_description = st.text_area("Description", value=offer.get('description', ''))
+                            
                             col1, col2 = st.columns(2)
                             with col1:
-                                buy_quantity = st.number_input("Buy Quantity", 
-                                                             min_value=1, 
-                                                             value=offer.get('buy_quantity', 1), 
-                                                             step=1)
+                                edit_start_date = st.date_input("Start Date", 
+                                                              value=datetime.datetime.strptime(offer.get('start_date'), "%Y-%m-%d").date())
                             with col2:
-                                get_quantity = st.number_input("Get Quantity Free", 
-                                                             min_value=1, 
-                                                             value=offer.get('get_quantity', 1), 
-                                                             step=1)
+                                edit_end_date = st.date_input("End Date", 
+                                                            value=datetime.datetime.strptime(offer.get('end_date'), "%Y-%m-%d").date())
                             
-                            product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-                            selected_products = st.multiselect("Products", 
-                                                             list(product_options.keys()), 
-                                                             default=[f"{products[p]['name']} ({p})" for p in offer.get('products', [])])
-                        
-                        elif offer['type'] == "bundle":
-                            product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-                            selected_products = st.multiselect("Bundle Products", 
-                                                             list(product_options.keys()), 
-                                                             default=[f"{products[p]['name']} ({p})" for p in offer.get('products', [])],
-                                                             max_selections=5)
-                            bundle_price = st.number_input("Bundle Price", 
-                                                         min_value=0.01, 
-                                                         value=offer.get('bundle_price', 0.0), 
-                                                         step=1.0)
-                        
-                        elif offer['type'] == "special_price":
-                            product_options = {f"{v['name']} ({k})": k for k, v in products.items()}
-                            selected_product = st.selectbox("Product", 
-                                                          [""] + list(product_options.keys()), 
-                                                          index=list(product_options.keys()).index(f"{products[offer['product']]['name']} ({offer['product']})") + 1 
-                                                          if offer.get('product') in products else 0)
-                            special_price = st.number_input("Special Price", 
-                                                          min_value=0.01, 
-                                                          value=offer.get('special_price', 0.0), 
-                                                          step=1.0)
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            start_date = st.date_input("Start Date", 
-                                                     value=datetime.datetime.strptime(offer.get('start_date'), "%Y-%m-%d").date())
-                        with col2:
-                            end_date = st.date_input("End Date", 
-                                                   value=datetime.datetime.strptime(offer.get('end_date'), "%Y-%m-%d").date())
-                        
-                        active = st.checkbox("Active", value=offer.get('active', True))
-                        
-                        if st.form_submit_button("Update Offer"):
-                            offers[offer_id]['name'] = name
-                            offers[offer_id]['description'] = description
-                            offers[offer_id]['type'] = offer_type.lower()
-                            offers[offer_id]['start_date'] = start_date.strftime("%Y-%m-%d")
-                            offers[offer_id]['end_date'] = end_date.strftime("%Y-%m-%d")
-                            offers[offer_id]['active'] = active
-                            offers[offer_id]['updated_by'] = st.session_state.user_info['username']
-                            offers[offer_id]['updated_at'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                            edit_active = st.checkbox("Active", value=offer.get('active', True))
                             
-                            if offer['type'] == "bogo":
-                                offers[offer_id]['buy_quantity'] = buy_quantity
-                                offers[offer_id]['get_quantity'] = get_quantity
-                                offers[offer_id]['products'] = [product_options[p] for p in selected_products]
-                            elif offer['type'] == "bundle":
-                                offers[offer_id]['products'] = [product_options[p] for p in selected_products]
-                                offers[offer_id]['bundle_price'] = bundle_price
-                            elif offer['type'] == "special_price":
-                                offers[offer_id]['product'] = product_options[selected_product]
-                                offers[offer_id]['special_price'] = special_price
+                            # Type-specific editing
+                            if offer['type'] == 'bogo':
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    edit_buy_qty = st.number_input("Buy Quantity", min_value=1, 
+                                                                 value=offer.get('buy_quantity', 1), step=1)
+                                with col2:
+                                    edit_get_qty = st.number_input("Get Quantity Free", min_value=1, 
+                                                                  value=offer.get('get_quantity', 1), step=1)
                             
+                            elif offer['type'] == 'bundle':
+                                edit_bundle_price = st.number_input("Bundle Price", min_value=0.01, 
+                                                                  value=offer.get('bundle_price', 0.0), step=0.01)
+                            
+                            elif offer['type'] == 'special_price':
+                                edit_special_price = st.number_input("Special Price", min_value=0.01, 
+                                                                   value=offer.get('special_price', 0.0), step=0.01)
+                            
+                            elif offer['type'] == 'percentage_discount':
+                                edit_discount_percent = st.number_input("Discount Percentage", min_value=1, max_value=100, 
+                                                                      value=offer.get('discount_percent', 10), step=1)
+                            
+                            elif offer['type'] == 'fixed_discount':
+                                edit_discount_amount = st.number_input("Discount Amount", min_value=0.01, 
+                                                                     value=offer.get('discount_amount', 1.0), step=0.01)
+                            
+                            if st.form_submit_button("💾 Update Offer"):
+                                # Update offer data
+                                offers[offer_id]['name'] = edit_name
+                                offers[offer_id]['description'] = edit_description
+                                offers[offer_id]['start_date'] = edit_start_date.strftime("%Y-%m-%d")
+                                offers[offer_id]['end_date'] = edit_end_date.strftime("%Y-%m-%d")
+                                offers[offer_id]['active'] = edit_active
+                                offers[offer_id]['updated_at'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                                
+                                # Update type-specific data
+                                if offer['type'] == 'bogo':
+                                    offers[offer_id]['buy_quantity'] = edit_buy_qty
+                                    offers[offer_id]['get_quantity'] = edit_get_qty
+                                elif offer['type'] == 'bundle':
+                                    offers[offer_id]['bundle_price'] = edit_bundle_price
+                                elif offer['type'] == 'special_price':
+                                    offers[offer_id]['special_price'] = edit_special_price
+                                elif offer['type'] == 'percentage_discount':
+                                    offers[offer_id]['discount_percent'] = edit_discount_percent
+                                elif offer['type'] == 'fixed_discount':
+                                    offers[offer_id]['discount_amount'] = edit_discount_amount
+                                
+                                save_data(offers, OFFERS_FILE)
+                                st.success("✅ Offer updated successfully!")
+                                st.rerun()
+                        
+                        # Delete button
+                        if st.button("🗑️ Delete Offer", key=f"delete_{offer_id}"):
+                            del offers[offer_id]
                             save_data(offers, OFFERS_FILE)
-                            st.success("Offer updated successfully")
+                            st.success("✅ Offer deleted successfully!")
+                            st.rerun()
     
     with tab3:
         st.header("Bulk Import Offers")
         
         st.info("Download the template file to prepare your offer data")
         
-        # Generate template file
+        # Generate template file with examples for each offer type
         template_data = {
-            "name": ["Summer BOGO", ""],
-            "description": ["Buy 2 Get 1 Free", ""],
-            "type": ["BOGO", ""],
-            "buy_quantity": [2, ""],
-            "get_quantity": [1, ""],
-            "products": ["123456789012,987654321098", ""],
-            "bundle_price": ["", ""],
-            "special_price": ["", ""],
-            "start_date": ["2023-06-01", ""],
-            "end_date": ["2023-08-31", ""],
-            "active": [True, ""]
+            "name": ["Summer BOGO", "Winter Bundle", "Spring Special", "Fall Discount"],
+            "description": ["Buy 2 Get 1 Free Summer Special", "Winter essentials bundle", "Spring clearance special pricing", "Fall season discount"],
+            "type": ["bogo", "bundle", "special_price", "percentage_discount"],
+            "buy_quantity": [2, "", "", ""],
+            "get_quantity": [1, "", "", ""],
+            "bundle_price": ["", 29.99, "", ""],
+            "special_price": ["", "", 15.99, ""],
+            "discount_percent": ["", "", "", 15],
+            "discount_amount": ["", "", "", ""],
+            "product": ["", "", "123456789012", ""],
+            "products": ["123456789012,987654321098", "123456789012,987654321098,555555555555", "", "123456789012,987654321098"],
+            "start_date": ["2023-06-01", "2023-12-01", "2023-03-01", "2023-09-01"],
+            "end_date": ["2023-08-31", "2023-02-28", "2023-05-31", "2023-11-30"],
+            "active": [True, True, True, True],
+            "apply_to_all": [False, False, False, False]
         }
         template_df = pd.DataFrame(template_data)
         
         st.download_button(
-            label="Download Template",
+            label="📥 Download Import Template",
             data=template_df.to_csv(index=False).encode('utf-8'),
-            file_name="offer_import_template.csv",
-            mime="text/csv"
+            file_name="offers_import_template.csv",
+            mime="text/csv",
+            help="Download the CSV template with example data for different offer types"
         )
         
-        uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
+        uploaded_file = st.file_uploader("Choose a CSV file", type=['csv'], 
+                                       help="Upload your offers data CSV file")
         
         if uploaded_file:
             try:
                 df = pd.read_csv(uploaded_file)
-                st.dataframe(df)
+                st.success("✅ CSV file loaded successfully!")
                 
-                if st.button("Import Offers"):
+                # Show preview
+                st.subheader("Data Preview")
+                st.dataframe(df.head())
+                
+                # Validation options
+                st.subheader("Import Options")
+                import_mode = st.radio("Import Mode", 
+                                     ["Add new offers only", "Update existing offers", "Add or update offers"],
+                                     help="Choose how to handle existing offers with the same name")
+                
+                on_error = st.radio("On Error", 
+                                  ["Skip row and continue", "Stop import"],
+                                  help="Choose what to do when encountering errors")
+                
+                if st.button("🚀 Import Offers", type="primary"):
                     offers = load_data(OFFERS_FILE)
                     products = load_data(PRODUCTS_FILE)
                     imported = 0
                     updated = 0
-                    errors = 0
+                    errors = []
                     
-                    for _, row in df.iterrows():
+                    for index, row in df.iterrows():
                         try:
-                            if pd.isna(row['name']) or str(row['name']).strip() == "":
-                                errors += 1
+                            # Skip empty rows
+                            if pd.isna(row.get('name')) or not str(row.get('name')).strip():
+                                errors.append(f"Row {index+2}: Missing offer name")
                                 continue
                             
-                            if pd.isna(row['type']) or str(row['type']).strip().lower() not in ["bogo", "bundle", "special_price"]:
-                                errors += 1
+                            # Basic validation
+                            if pd.isna(row.get('type')) or str(row.get('type')).strip() not in ['bogo', 'bundle', 'special_price', 'percentage_discount', 'fixed_discount']:
+                                errors.append(f"Row {index+2}: Invalid offer type")
                                 continue
                             
-                            offer_id = str(uuid.uuid4())
-                            offer_type = str(row['type']).strip().lower()
+                            offer_type = str(row.get('type')).strip()
+                            
+                            # Check if offer already exists
+                            existing_offer_id = None
+                            for oid, o in offers.items():
+                                if o['name'] == str(row.get('name')).strip():
+                                    existing_offer_id = oid
+                                    break
+                            
+                            # Handle based on import mode
+                            if import_mode == "Add new offers only" and existing_offer_id:
+                                continue
+                            if import_mode == "Update existing offers" and not existing_offer_id:
+                                continue
+                            
+                            # Prepare offer data
+                            offer_id = existing_offer_id if existing_offer_id else f"offer_{generate_short_id()}"
                             
                             offer_data = {
                                 'id': offer_id,
-                                'name': str(row['name']).strip(),
-                                'description': str(row['description']).strip() if not pd.isna(row['description']) else "",
+                                'name': str(row.get('name')).strip(),
+                                'description': str(row.get('description')).strip() if not pd.isna(row.get('description')) else "",
                                 'type': offer_type,
-                                'start_date': str(row['start_date']).strip() if not pd.isna(row['start_date']) else datetime.date.today().strftime("%Y-%m-%d"),
-                                'end_date': str(row['end_date']).strip() if not pd.isna(row['end_date']) else (datetime.date.today() + datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
-                                'active': bool(row['active']) if not pd.isna(row['active']) else True,
-                                'created_by': st.session_state.user_info['username'],
-                                'created_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                                'start_date': str(row.get('start_date')).strip() if not pd.isna(row.get('start_date')) else datetime.date.today().strftime("%Y-%m-%d"),
+                                'end_date': str(row.get('end_date')).strip() if not pd.isna(row.get('end_date')) else (datetime.date.today() + datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
+                                'active': bool(row.get('active')) if not pd.isna(row.get('active')) else True,
+                                'apply_to_all': bool(row.get('apply_to_all')) if not pd.isna(row.get('apply_to_all')) else False,
+                                'updated_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
                             }
                             
-                            if offer_type == "bogo":
-                                if pd.isna(row['buy_quantity']) or pd.isna(row['get_quantity']):
-                                    errors += 1
-                                    continue
-                                
-                                offer_data['buy_quantity'] = int(row['buy_quantity'])
-                                offer_data['get_quantity'] = int(row['get_quantity'])
-                                
-                                if pd.isna(row['products']):
-                                    errors += 1
-                                    continue
-                                
-                                prod_list = [p.strip() for p in str(row['products']).split(',')]
-                                valid_prods = [p for p in prod_list if p in products]
-                                if not valid_prods:
-                                    errors += 1
-                                    continue
-                                offer_data['products'] = valid_prods
+                            if not existing_offer_id:
+                                offer_data['created_by'] = st.session_state.user_info['username']
+                                offer_data['created_at'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
                             
-                            elif offer_type == "bundle":
-                                if pd.isna(row['bundle_price']):
-                                    errors += 1
-                                    continue
+                            # Add type-specific data
+                            if offer_type == 'bogo':
+                                offer_data['buy_quantity'] = int(row.get('buy_quantity', 1)) if not pd.isna(row.get('buy_quantity')) else 1
+                                offer_data['get_quantity'] = int(row.get('get_quantity', 1)) if not pd.isna(row.get('get_quantity')) else 1
                                 
-                                offer_data['bundle_price'] = float(row['bundle_price'])
-                                
-                                if pd.isna(row['products']):
-                                    errors += 1
-                                    continue
-                                
-                                prod_list = [p.strip() for p in str(row['products']).split(',')]
-                                valid_prods = [p for p in prod_list if p in products]
-                                if not valid_prods:
-                                    errors += 1
-                                    continue
-                                offer_data['products'] = valid_prods
+                                if not offer_data['apply_to_all']:
+                                    if pd.isna(row.get('products')):
+                                        errors.append(f"Row {index+2}: Products required for BOGO offer")
+                                        continue
+                                    product_list = [p.strip() for p in str(row.get('products')).split(',')]
+                                    valid_products = [p for p in product_list if p in products]
+                                    if not valid_products:
+                                        errors.append(f"Row {index+2}: No valid products found")
+                                        continue
+                                    offer_data['products'] = valid_products
                             
-                            elif offer_type == "special_price":
-                                if pd.isna(row['special_price']):
-                                    errors += 1
+                            elif offer_type == 'bundle':
+                                if pd.isna(row.get('bundle_price')):
+                                    errors.append(f"Row {index+2}: Bundle price required")
                                     continue
+                                offer_data['bundle_price'] = float(row.get('bundle_price'))
                                 
-                                offer_data['special_price'] = float(row['special_price'])
-                                
-                                if pd.isna(row['products']):
-                                    errors += 1
-                                    continue
-                                
-                                product_id = str(row['products']).strip()
-                                if product_id not in products:
-                                    errors += 1
-                                    continue
-                                offer_data['product'] = product_id
+                                if not offer_data['apply_to_all']:
+                                    if pd.isna(row.get('products')):
+                                        errors.append(f"Row {index+2}: Products required for bundle offer")
+                                        continue
+                                    product_list = [p.strip() for p in str(row.get('products')).split(',')]
+                                    valid_products = [p for p in product_list if p in products]
+                                    if len(valid_products) < 2:
+                                        errors.append(f"Row {index+2}: Bundle requires at least 2 products")
+                                        continue
+                                    offer_data['products'] = valid_products
                             
+                            elif offer_type == 'special_price':
+                                if pd.isna(row.get('special_price')):
+                                    errors.append(f"Row {index+2}: Special price required")
+                                    continue
+                                offer_data['special_price'] = float(row.get('special_price'))
+                                
+                                if not offer_data['apply_to_all']:
+                                    if pd.isna(row.get('product')):
+                                        errors.append(f"Row {index+2}: Product required for special price offer")
+                                        continue
+                                    product_id = str(row.get('product')).strip()
+                                    if product_id not in products:
+                                        errors.append(f"Row {index+2}: Product {product_id} not found")
+                                        continue
+                                    offer_data['product'] = product_id
+                            
+                            elif offer_type == 'percentage_discount':
+                                if pd.isna(row.get('discount_percent')):
+                                    errors.append(f"Row {index+2}: Discount percentage required")
+                                    continue
+                                offer_data['discount_percent'] = float(row.get('discount_percent'))
+                                
+                                if not offer_data['apply_to_all']:
+                                    if pd.isna(row.get('products')):
+                                        errors.append(f"Row {index+2}: Products required for discount offer")
+                                        continue
+                                    product_list = [p.strip() for p in str(row.get('products')).split(',')]
+                                    valid_products = [p for p in product_list if p in products]
+                                    if not valid_products:
+                                        errors.append(f"Row {index+2}: No valid products found")
+                                        continue
+                                    offer_data['products'] = valid_products
+                            
+                            elif offer_type == 'fixed_discount':
+                                if pd.isna(row.get('discount_amount')):
+                                    errors.append(f"Row {index+2}: Discount amount required")
+                                    continue
+                                offer_data['discount_amount'] = float(row.get('discount_amount'))
+                                
+                                if not offer_data['apply_to_all']:
+                                    if pd.isna(row.get('products')):
+                                        errors.append(f"Row {index+2}: Products required for discount offer")
+                                        continue
+                                    product_list = [p.strip() for p in str(row.get('products')).split(',')]
+                                    valid_products = [p for p in product_list if p in products]
+                                    if not valid_products:
+                                        errors.append(f"Row {index+2}: No valid products found")
+                                        continue
+                                    offer_data['products'] = valid_products
+                            
+                            # Save offer
                             offers[offer_id] = offer_data
-                            imported += 1
-                        
+                            
+                            if existing_offer_id:
+                                updated += 1
+                            else:
+                                imported += 1
+                            
                         except Exception as e:
-                            errors += 1
-                            continue
+                            error_msg = f"Row {index+2}: {str(e)}"
+                            errors.append(error_msg)
+                            if on_error == "Stop import":
+                                break
                     
+                    # Save all offers
                     save_data(offers, OFFERS_FILE)
-                    st.success(f"Import completed: {imported} new offers, {errors} errors")
+                    
+                    # Show results
+                    st.success(f"✅ Import completed: {imported} new offers, {updated} updated")
+                    
+                    if errors:
+                        st.warning(f"Encountered {len(errors)} errors:")
+                        with st.expander("View Errors"):
+                            for error in errors:
+                                st.write(f"- {error}")
+                    
             except Exception as e:
-                st.error(f"Error reading CSV file: {str(e)}")
+                st.error(f"❌ Error reading CSV file: {str(e)}")
+
+# Enhanced apply_offers_to_cart function with better BOGO handling
+def apply_offers_to_cart(cart_items, current_total):
+    """
+    Apply active offers to the cart and return the updated total
+    """
+    offers = load_data(OFFERS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    
+    # Get active offers (within date range)
+    current_date = datetime.date.today()
+    active_offers = []
+    
+    for offer in offers.values():
+        if not offer.get('active', True):
+            continue
+        
+        try:
+            start_date = datetime.datetime.strptime(offer.get('start_date'), "%Y-%m-%d").date()
+            end_date = datetime.datetime.strptime(offer.get('end_date'), "%Y-%m-%d").date()
+            
+            if start_date <= current_date <= end_date:
+                active_offers.append(offer)
+        except (ValueError, TypeError):
+            # Skip offers with invalid date formats
+            continue
+    
+    total_after_offers = current_total
+    applied_offers = []
+    
+    # Create a copy of cart items for processing
+    cart_copy = cart_items.copy()
+    
+    for offer in active_offers:
+        try:
+            if offer['type'] == 'bogo':
+                # Buy One Get One Free offer
+                applicable_products = []
+                
+                if offer.get('apply_to_all', False):
+                    # Apply to all products in cart
+                    applicable_products = list(cart_copy.keys())
+                else:
+                    # Apply only to specified products
+                    applicable_products = offer.get('products', [])
+                
+                buy_qty = offer.get('buy_quantity', 1)
+                get_qty = offer.get('get_quantity', 1)
+                
+                for barcode in applicable_products:
+                    if barcode in cart_copy:
+                        item = cart_copy[barcode]
+                        eligible_sets = item['quantity'] // (buy_qty + get_qty)
+                        
+                        if eligible_sets > 0:
+                            discount_amount = eligible_sets * get_qty * item['price']
+                            total_after_offers -= discount_amount
+                            
+                            applied_offers.append({
+                                'type': 'bogo',
+                                'name': offer['name'],
+                                'product': item['name'],
+                                'discount': discount_amount,
+                                'details': f"Buy {buy_qty} Get {get_qty} Free"
+                            })
+            
+            elif offer['type'] == 'bundle':
+                # Bundle offer - check if all bundle products are in cart
+                bundle_products = offer.get('products', [])
+                
+                if all(barcode in cart_copy for barcode in bundle_products):
+                    # Calculate total quantity of each product in the bundle
+                    bundle_quantities = [cart_copy[barcode]['quantity'] for barcode in bundle_products]
+                    max_bundles = min(bundle_quantities)
+                    
+                    if max_bundles > 0:
+                        # Calculate original and bundle prices
+                        original_price = 0
+                        for barcode in bundle_products:
+                            original_price += cart_copy[barcode]['price'] * max_bundles
+                        
+                        bundle_price = offer.get('bundle_price', 0) * max_bundles
+                        discount_amount = original_price - bundle_price
+                        total_after_offers -= discount_amount
+                        
+                        applied_offers.append({
+                            'type': 'bundle',
+                            'name': offer['name'],
+                            'discount': discount_amount,
+                            'details': f"Bundle of {len(bundle_products)} products"
+                        })
+            
+            elif offer['type'] == 'special_price':
+                # Special price offer
+                if offer.get('apply_to_all', False):
+                    # Apply to all products
+                    for barcode, item in cart_copy.items():
+                        special_price = offer.get('special_price', 0)
+                        discount_amount = (item['price'] - special_price) * item['quantity']
+                        total_after_offers -= discount_amount
+                        
+                        applied_offers.append({
+                            'type': 'special_price',
+                            'name': offer['name'],
+                            'product': item['name'],
+                            'discount': discount_amount,
+                            'details': f"Special price: {format_currency(special_price)}"
+                        })
+                else:
+                    # Apply to specific product
+                    product_barcode = offer.get('product')
+                    if product_barcode in cart_copy:
+                        special_price = offer.get('special_price', 0)
+                        item = cart_copy[product_barcode]
+                        discount_amount = (item['price'] - special_price) * item['quantity']
+                        total_after_offers -= discount_amount
+                        
+                        applied_offers.append({
+                            'type': 'special_price',
+                            'name': offer['name'],
+                            'product': item['name'],
+                            'discount': discount_amount,
+                            'details': f"Special price: {format_currency(special_price)}"
+                        })
+            
+            elif offer['type'] == 'percentage_discount':
+                # Percentage discount offer
+                applicable_products = []
+                
+                if offer.get('apply_to_all', False):
+                    # Apply to all products
+                    applicable_products = list(cart_copy.keys())
+                else:
+                    # Apply to specific products
+                    applicable_products = offer.get('products', [])
+                
+                discount_percent = offer.get('discount_percent', 0) / 100
+                
+                for barcode in applicable_products:
+                    if barcode in cart_copy:
+                        item = cart_copy[barcode]
+                        discount_amount = item['price'] * item['quantity'] * discount_percent
+                        total_after_offers -= discount_amount
+                        
+                        applied_offers.append({
+                            'type': 'percentage_discount',
+                            'name': offer['name'],
+                            'product': item['name'],
+                            'discount': discount_amount,
+                            'details': f"{offer.get('discount_percent', 0)}% off"
+                        })
+            
+            elif offer['type'] == 'fixed_discount':
+                # Fixed amount discount offer
+                applicable_products = []
+                
+                if offer.get('apply_to_all', False):
+                    # Apply to all products
+                    applicable_products = list(cart_copy.keys())
+                else:
+                    # Apply to specific products
+                    applicable_products = offer.get('products', [])
+                
+                discount_amount_per_item = offer.get('discount_amount', 0)
+                
+                for barcode in applicable_products:
+                    if barcode in cart_copy:
+                        item = cart_copy[barcode]
+                        total_discount = discount_amount_per_item * item['quantity']
+                        total_after_offers -= total_discount
+                        
+                        applied_offers.append({
+                            'type': 'fixed_discount',
+                            'name': offer['name'],
+                            'product': item['name'],
+                            'discount': total_discount,
+                            'details': f"{format_currency(discount_amount_per_item)} off per item"
+                        })
+        
+        except Exception as e:
+            # Skip offers that cause errors but continue processing others
+            print(f"Error applying offer {offer.get('name', 'Unknown')}: {str(e)}")
+            continue
+    
+    # Display applied offers
+    if applied_offers:
+        st.subheader("🎁 Applied Offers & Discounts")
+        
+        for offer in applied_offers:
+            col1, col2, col3 = st.columns([3, 2, 1])
+            
+            with col1:
+                st.write(f"**{offer['name']}**")
+                if 'product' in offer:
+                    st.write(f"*{offer['product']}*")
+                if 'details' in offer:
+                    st.caption(offer['details'])
+            
+            with col2:
+                st.write(f"Discount: -{format_currency(offer['discount'])}")
+            
+            with col3:
+                if offer['type'] == 'bogo':
+                    st.success("BOGO")
+                elif offer['type'] == 'bundle':
+                    st.info("BUNDLE")
+                elif offer['type'] == 'special_price':
+                    st.warning("SPECIAL")
+                elif offer['type'] == 'percentage_discount':
+                    st.info("PERCENT")
+                elif offer['type'] == 'fixed_discount':
+                    st.info("FIXED")
+        
+        st.markdown("---")
+    
+    return max(total_after_offers, 0)  # Ensure total doesn't go negative
                 
 # Loyalty Program Management
 def loyalty_management():
