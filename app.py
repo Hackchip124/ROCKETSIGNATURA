@@ -1113,18 +1113,31 @@ def dashboard():
     st.title("ROCKET VAPE POS ")
     st.sidebar.title("Navigation")
     
-    # Shift management for cashiers
+    # Shift management for cashiers - IMPROVED INPUT
     if is_cashier() and not st.session_state.shift_started:
         with st.sidebar:
             st.subheader("Shift Management")
-            starting_cash = st.number_input("Starting Cash Amount", min_value=0.0, value=0.0, step=1.0)
-            if st.button("Start Shift"):
-                shift_id = start_shift()
-                shifts = load_data(SHIFTS_FILE)
-                shifts[shift_id]['starting_cash'] = starting_cash
-                save_data(shifts, SHIFTS_FILE)
-                st.success("Shift started successfully")
-                st.rerun()
+            
+            # Use text input for manual entry but validate as number
+            cash_input = st.text_input(
+                "Starting Cash Amount", 
+                value="0.00",
+                help="Enter the starting cash amount (numbers only)"
+            )
+            if st.button("Start Shift", key="start_shift_btn"):
+                try:
+                    starting_cash = float(cash_input)
+                    if starting_cash < 0:
+                        st.sidebar.error("Cash amount cannot be negative")
+                    else:
+                        shift_id = start_shift()
+                        shifts = load_data(SHIFTS_FILE)
+                        shifts[shift_id]['starting_cash'] = starting_cash
+                        save_data(shifts, SHIFTS_FILE)
+                        st.sidebar.success("Shift started successfully")
+                        st.rerun()
+                except ValueError:
+                    st.sidebar.error("Please enter a valid number for starting cash")
     
     # Navigation
     pages = {
