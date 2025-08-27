@@ -287,19 +287,101 @@ def print_receipt(receipt_text):
 
 def open_cash_drawer():
     settings = load_data(SETTINGS_FILE)
+    
+    # If cash drawer is not enabled in settings, try to open it anyway
     if not settings.get('cash_drawer_enabled', False):
-        return False
+        st.warning("Cash drawer is not enabled in settings, but attempting to open anyway...")
     
+    # Try the configured command first
     command = settings.get('cash_drawer_command', '')
-    if not command:
-        return False
+    if command:
+        try:
+            result = subprocess.run(command, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                return True
+            else:
+                st.warning(f"Configured command failed: {result.stderr}")
+        except Exception as e:
+            st.warning(f"Failed to execute configured command: {str(e)}")
     
+    # If configured command fails or doesn't exist, try common cash drawer commands
+    st.info("Trying alternative methods to open cash drawer...")
+    
+    # Common cash drawer commands for different systems
+    common_commands = [
+        # ESC/POS commands for most receipt printers
+        'echo -e "\x1B\x70\x00\x19\xFA" > /dev/usb/lp0',  # USB printer
+        'echo -e "\x1B\x70\x00\x19\xFA" > /dev/ttyUSB0',  # Serial printer
+        'echo -e "\x1B\x70\x00\x19\xFA" | lpr',           # Network printer
+        
+        # Windows commands
+        'echo %FF% > LPT1',                              # Parallel port
+        'powershell -command "$x=[char]27+[char]112+[char]0+[char]25+[char]250; $port= new-Object System.IO.Ports.SerialPort COM1,9600,None,8,one; $port.open(); $port.write($x); $port.close()"',
+        
+        # Generic system commands
+        'echo -e "\x1B\x70\x00\x19\xFA" > /dev/ttyS0',   # Serial port 1
+        'echo -e "\x1B\x70\x00\x19\xFA" > /dev/ttyS1',   # Serial port 2
+    ]
+    
+    # Try each command until one works
+    for cmd in common_commands:
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                st.success(f"Cash drawer opened using: {cmd}")
+                return True
+        except (subprocess.TimeoutExpired, Exception):
+            continue
+    
+    # If all else fails, try a platform-specific approach
     try:
-        subprocess.run(command, shell=True)
-        return True
+        if platform.system() == "Windows":
+            # Try to access parallel port directly
+            try:
+                import win32file
+                handle = win32file.CreateFile("LPT1", win32file.GENERIC_WRITE, 0, None, win32file.OPEN_EXISTING, 0, None)
+                win32file.WriteFile(handle, b'\x1B\x70\x00\x19\xFA')
+                win32file.CloseHandle(handle)
+                st.success("Cash drawer opened using direct parallel port access")
+                return True
+            except ImportError:
+                st.warning("pywin32 module not available for direct port access")
+            except Exception as e:
+                st.warning(f"Direct parallel port access failed: {str(e)}")
+        
+        elif platform.system() in ["Linux", "Darwin"]:  # Linux or macOS
+            # Try to find and use any available printer
+            try:
+                # List available printers
+                if platform.system() == "Linux":
+                    printers = subprocess.run(['lpstat', '-a'], capture_output=True, text=True)
+                    if printers.returncode == 0:
+                        printer_name = printers.stdout.split()[0] if printers.stdout else "printer"
+                        subprocess.run(f'echo -e "\x1B\x70\x00\x19\xFA" | lpr -P {printer_name}', shell=True)
+                        st.success(f"Cash drawer opened using printer: {printer_name}")
+                        return True
+                else:  # macOS
+                    subprocess.run('echo -e "\x1B\x70\x00\x19\xFA" | lpr', shell=True)
+                    st.success("Cash drawer opened using default printer")
+                    return True
+            except Exception as e:
+                st.warning(f"Printer access failed: {str(e)}")
+    
     except Exception as e:
-        st.error(f"Failed to open cash drawer: {str(e)}")
-        return False
+        st.error(f"All cash drawer opening methods failed: {str(e)}")
+    
+    # Final fallback - show instructions to user
+    st.error("""
+    ❌ Could not automatically open cash drawer.
+    
+    Please try one of these manual solutions:
+    1. Press the physical button on your cash drawer
+    2. Use the manual key to open it
+    3. Check your cash drawer connections and power
+    4. Configure the correct cash drawer command in System Settings
+    """)
+    
+    return False
 
 # Improved Barcode Scanner
 class BarcodeScanner:
@@ -564,7 +646,7 @@ if not st.session_state.barcode_scanner_setup:
 
 # Login Page
 def login_page():
-    st.title("Supermarket POS - Login")
+    st.title("ROCKET VAPE POS - Login")
     
     with st.form("login_form"):
         username = st.text_input("Username")
@@ -630,7 +712,391 @@ def end_shift():
         st.session_state.shift_id = None
         return True
     return False
+# cashier loyality 
+def cashier_loyalty_management():
+    if not is_cashier():
+        st.warning("You don't have permission to access this page")
+        return
+    
+    st.title("👥 Loyalty Customer Management")
+    
+    # Load loyalty data
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    tiers = loyalty_data.get('tiers', {})
+    rewards = loyalty_data.get('rewards', {})
+    
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🔍 Find Customer", 
+        "📊 Customer Details", 
+        "🎁 Available Rewards", 
+        "➕ New Customer"
+    ])
+    
+    with tab1:
+        st.header("Find Loyalty Customer")
+        
+        # Search options
+        col1, col2 = st.columns(2)
+        with col1:
+            search_option = st.radio("Search by:", ["Phone Number", "Customer ID", "Name"])
+        
+        with col2:
+            if search_option == "Phone Number":
+                search_term = st.text_input("Enter Phone Number", placeholder="e.g., 555-0123")
+            elif search_option == "Customer ID":
+                search_term = st.text_input("Enter Customer ID", placeholder="e.g., CUST123")
+            else:
+                search_term = st.text_input("Enter Customer Name", placeholder="e.g., John Smith")
+        
+        # Search button
+        if st.button("🔍 Search Customer", use_container_width=True):
+            found_customers = []
+            
+            if search_term:
+                for customer_id, customer in customers.items():
+                    if search_option == "Phone Number" and customer.get('phone', '').lower() == search_term.lower():
+                        found_customers.append((customer_id, customer))
+                    elif search_option == "Customer ID" and customer_id.lower() == search_term.lower():
+                        found_customers.append((customer_id, customer))
+                    elif search_option == "Name" and search_term.lower() in customer.get('name', '').lower():
+                        found_customers.append((customer_id, customer))
+            
+            if found_customers:
+                st.session_state.found_customers = found_customers
+                st.session_state.selected_customer_id = found_customers[0][0]
+                st.success(f"Found {len(found_customers)} customer(s)")
+            else:
+                st.warning("No customers found matching your search")
+                st.session_state.found_customers = []
+                st.session_state.selected_customer_id = None
+        
+        # Display search results
+        if 'found_customers' in st.session_state and st.session_state.found_customers:
+            st.subheader("Search Results")
+            
+            for customer_id, customer in st.session_state.found_customers:
+                col1, col2, col3 = st.columns([3, 2, 1])
+                with col1:
+                    st.write(f"**{customer.get('name', 'Unknown')}**")
+                    st.write(f"Phone: {customer.get('phone', 'N/A')}")
+                with col2:
+                    st.write(f"Points: {customer.get('points', 0)}")
+                    st.write(f"Tier: {customer.get('tier', 'Bronze')}")
+                with col3:
+                    if st.button("Select", key=f"select_{customer_id}", use_container_width=True):
+                        st.session_state.selected_customer_id = customer_id
+                        st.rerun()
+    
+    with tab2:
+        st.header("Customer Details")
+        
+        if 'selected_customer_id' not in st.session_state or not st.session_state.selected_customer_id:
+            st.info("Please search for and select a customer first")
+        else:
+            customer_id = st.session_state.selected_customer_id
+            customer = customers.get(customer_id, {})
+            
+            if not customer:
+                st.error("Customer not found")
+            else:
+                # Customer information
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Customer Information")
+                    st.write(f"**Name:** {customer.get('name', 'Unknown')}")
+                    st.write(f"**Phone:** {customer.get('phone', 'N/A')}")
+                    st.write(f"**Email:** {customer.get('email', 'N/A')}")
+                    st.write(f"**Customer ID:** {customer_id}")
+                
+                with col2:
+                    st.subheader("Loyalty Status")
+                    
+                    # Points display
+                    current_points = customer.get('points', 0)
+                    st.metric("Loyalty Points", f"{current_points:,}")
+                    
+                    # Tier information
+                    current_tier = customer.get('tier', 'Bronze')
+                    tier_info = tiers.get(current_tier, {})
+                    st.write(f"**Current Tier:** {current_tier}")
+                    
+                    # Next tier progress
+                    tier_names = list(tiers.keys())
+                    current_tier_index = tier_names.index(current_tier) if current_tier in tier_names else 0
+                    
+                    if current_tier_index < len(tier_names) - 1:
+                        next_tier = tier_names[current_tier_index + 1]
+                        next_tier_min = tiers[next_tier].get('min_points', 0)
+                        points_needed = max(0, next_tier_min - current_points)
+                        
+                        st.write(f"**Next Tier:** {next_tier} ({points_needed} points needed)")
+                        
+                        # Progress bar
+                        if next_tier_min > 0:
+                            progress = min(100, (current_points / next_tier_min) * 100)
+                            st.progress(progress / 100)
+                            st.write(f"Progress to {next_tier}: {progress:.1f}%")
+                
+                # Transaction history (simplified)
+                st.subheader("Recent Activity")
+                
+                # Get recent transactions for this customer
+                transactions = load_data(TRANSACTIONS_FILE)
+                customer_transactions = []
+                
+                for t in transactions.values():
+                    if t.get('customer_id') == customer_id:
+                        customer_transactions.append(t)
+                
+                # Sort by date, newest first
+                customer_transactions.sort(key=lambda x: x.get('date', ''), reverse=True)
+                
+                if customer_transactions:
+                    for i, trans in enumerate(customer_transactions[:5]):  # Show last 5 transactions
+                        with st.expander(f"Transaction {trans.get('date', 'Unknown date')} - {format_currency(trans.get('total', 0))}"):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"**Date:** {trans.get('date', 'N/A')}")
+                                st.write(f"**Total:** {format_currency(trans.get('total', 0))}")
+                            with col2:
+                                points_earned = trans.get('loyalty_points_earned', 0)
+                                points_redeemed = trans.get('loyalty_points_redeemed', 0)
+                                if points_earned > 0:
+                                    st.write(f"**Points Earned:** +{points_earned}")
+                                if points_redeemed > 0:
+                                    st.write(f"**Points Redeemed:** -{points_redeemed}")
+                else:
+                    st.info("No transaction history found")
+                
+                # Quick actions
+                st.subheader("Quick Actions")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("🖨️ Print Loyalty Card", use_container_width=True):
+                        print_loyalty_card(customer_id, customer)
+            
+                
+                with col2:
+                    if st.button("🔄 Refresh Data", use_container_width=True):
+                        st.rerun()
+    
+    with tab3:
+        st.header("Available Rewards")
+        
+        if 'selected_customer_id' not in st.session_state or not st.session_state.selected_customer_id:
+            st.info("Please select a customer first to view available rewards")
+        else:
+            customer_id = st.session_state.selected_customer_id
+            customer = customers.get(customer_id, {})
+            current_points = customer.get('points', 0)
+            
+            st.subheader(f"Available Points: {current_points}")
+            
+            # Filter active rewards
+            active_rewards = {k: v for k, v in rewards.items() if v.get('active', True)}
+            
+            if not active_rewards:
+                st.info("No rewards currently available")
+            else:
+                # Display rewards
+                for reward_id, reward in active_rewards.items():
+                    points_required = reward.get('points', 0)
+                    can_redeem = current_points >= points_required
+                    
+                    with st.container():
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        
+                        with col1:
+                            st.write(f"**{reward.get('name', 'Unknown Reward')}**")
+                            st.write(f"{reward.get('description', 'No description')}")
+                            st.write(f"**Cost:** {points_required} points")
+                        
+                        with col2:
+                            status_color = "green" if can_redeem else "red"
+                            status_text = "✅ Available" if can_redeem else "❌ Not enough points"
+                            st.markdown(f"<span style='color:{status_color}'>{status_text}</span>", unsafe_allow_html=True)
+                        
+                        with col3:
+                            if can_redeem:
+                                if st.button("Redeem", key=f"redeem_{reward_id}", use_container_width=True):
+                                    redeem_reward(customer_id, reward_id, reward)
+                            else:
+                                st.button("Redeem", disabled=True, use_container_width=True)
+                        
+                        st.markdown("---")
+    
+    with tab4:
+        st.header("Add New Loyalty Customer")
+        
+        with st.form("new_customer_form"):
+            st.subheader("Customer Information")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                name = st.text_input("Full Name*", help="Customer's full name")
+                phone = st.text_input("Phone Number*", help="Primary contact number")
+            with col2:
+                email = st.text_input("Email Address", help="Optional email address")
+                initial_points = st.number_input("Initial Points", min_value=0, value=0, help="Starting loyalty points")
+            
+            # Address information
+            st.subheader("Address Information (Optional)")
+            address = st.text_area("Street Address")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                city = st.text_input("City")
+            with col2:
+                postal_code = st.text_input("Postal Code")
+            
+            # Marketing preferences
+            st.subheader("Communication Preferences")
+            col1, col2 = st.columns(2)
+            with col1:
+                accept_emails = st.checkbox("Email offers and updates", value=True)
+            with col2:
+                accept_sms = st.checkbox("SMS/text messages", value=True)
+            
+            if st.form_submit_button("➕ Add Customer", use_container_width=True):
+                if not name or not phone:
+                    st.error("Name and phone number are required")
+                else:
+                    # Check if phone already exists
+                    phone_exists = any(c.get('phone') == phone for c in customers.values())
+                    if phone_exists:
+                        st.error("A customer with this phone number already exists")
+                    else:
+                        # Create new customer
+                        new_customer_id = f"CUST{generate_short_id()}"
+                        
+                        # Determine initial tier based on points
+                        initial_tier = "Bronze"
+                        for tier_name, tier_data in tiers.items():
+                            if initial_points >= tier_data.get('min_points', 0):
+                                initial_tier = tier_name
+                        
+                        new_customer = {
+                            'id': new_customer_id,
+                            'name': name,
+                            'phone': phone,
+                            'email': email,
+                            'address': address,
+                            'city': city,
+                            'postal_code': postal_code,
+                            'points': initial_points,
+                            'tier': initial_tier,
+                            'accept_emails': accept_emails,
+                            'accept_sms': accept_sms,
+                            'date_joined': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                            'joined_by': st.session_state.user_info['username']
+                        }
+                        
+                        customers[new_customer_id] = new_customer
+                        loyalty_data['customers'] = customers
+                        save_data(loyalty_data, LOYALTY_FILE)
+                        
+                        st.success(f"Customer added successfully! Customer ID: {new_customer_id}")
+                        
+                        # Auto-select the new customer
+                        st.session_state.selected_customer_id = new_customer_id
+                        st.session_state.found_customers = [(new_customer_id, new_customer)]
+                        st.rerun()
 
+# Helper functions for loyalty management
+def print_loyalty_card(customer_id, customer):
+    """Generate and print a loyalty card"""
+    try:
+        settings = load_data(SETTINGS_FILE)
+        
+        card_content = f"""
+        {settings.get('store_name', 'SUPERMARKET POS')}
+        LOYALTY CARD
+        ====================
+        Customer: {customer.get('name', 'N/A')}
+        ID: {customer_id}
+        Phone: {customer.get('phone', 'N/A')}
+        Tier: {customer.get('tier', 'Bronze')}
+        Points: {customer.get('points', 0)}
+        ====================
+        Issued: {get_current_datetime().strftime('%Y-%m-%d')}
+        """
+        
+        if print_receipt(card_content):
+            st.success("Loyalty card printed successfully")
+        else:
+            st.warning("Could not print automatically. Please try manual print.")
+            
+            # Show the card content for manual printing
+            st.text_area("Loyalty Card Content", card_content, height=200)
+            
+    except Exception as e:
+        st.error(f"Error printing loyalty card: {str(e)}")
+
+def redeem_reward(customer_id, reward_id, reward):
+    """Redeem a reward for a customer"""
+    try:
+        loyalty_data = load_data(LOYALTY_FILE)
+        customers = loyalty_data.get('customers', {})
+        
+        customer = customers.get(customer_id)
+        if not customer:
+            st.error("Customer not found")
+            return
+        
+        points_required = reward.get('points', 0)
+        current_points = customer.get('points', 0)
+        
+        if current_points < points_required:
+            st.error("Not enough points to redeem this reward")
+            return
+        
+        # Deduct points
+        customer['points'] = current_points - points_required
+        customer['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Add redemption record
+        redemptions = customer.get('redemptions', [])
+        redemptions.append({
+            'reward_id': reward_id,
+            'reward_name': reward.get('name', 'Unknown'),
+            'points_used': points_required,
+            'date_redeemed': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+            'redeemed_by': st.session_state.user_info['username']
+        })
+        customer['redemptions'] = redemptions
+        
+        # Save changes
+        loyalty_data['customers'] = customers
+        save_data(loyalty_data, LOYALTY_FILE)
+        
+        # Generate redemption receipt
+        redemption_receipt = f"""
+        REWARD REDEMPTION RECEIPT
+        ====================
+        Customer: {customer.get('name', 'N/A')}
+        Reward: {reward.get('name', 'Unknown')}
+        Points Used: {points_required}
+        Remaining Points: {customer['points']}
+        Date: {get_current_datetime().strftime('%Y-%m-%d %H:%M:%S')}
+        ====================
+        {reward.get('description', '')}
+        ====================
+        Thank you for your loyalty!
+        """
+        
+        if print_receipt(redemption_receipt):
+            st.success("Reward redeemed successfully! Receipt printed.")
+        else:
+            st.success("Reward redeemed successfully! (Print failed)")
+        
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"Error redeeming reward: {str(e)}")
 # Dashboard
 def dashboard():
     settings = load_data(SETTINGS_FILE)
@@ -692,7 +1158,10 @@ def dashboard():
             "Dashboard": dashboard_content,
             "POS Terminal": pos_terminal,
             "Shifts Management": shifts_management,
-            "Returns & Refunds": returns_management
+            "Returns & Refunds": returns_management,
+            "Outdoor Sales": outdoor_sales_portal,
+            "Loyality Customer":cashier_loyalty_management,
+            "Transaction History": transaction_history
         }
     
     selected_page = st.sidebar.radio("Go to", list(pages.keys()))
@@ -708,11 +1177,119 @@ def dashboard():
     # Display selected page
     pages[selected_page]()
 
+# transcation historia 
+def generate_receipt(transaction):
+    settings = load_data(SETTINGS_FILE)
+    receipt = ""
+    
+    # Header
+    receipt += f"{settings.get('store_name', 'Supermarket POS')}\n"
+    receipt += f"{settings.get('store_address', '')}\n"
+    receipt += f"{settings.get('store_phone', '')}\n"
+    receipt += "=" * 40 + "\n"
+    
+    if settings.get('receipt_header', ''):
+        receipt += f"{settings['receipt_header']}\n"
+        receipt += "=" * 40 + "\n"
+    
+    receipt += f"Date: {transaction['date']}\n"
+    receipt += f"Cashier: {transaction['cashier']}\n"
+    receipt += f"Transaction ID: {transaction['transaction_id']}\n"
+    receipt += "=" * 40 + "\n"
+    
+    # Items
+    for barcode, item in transaction['items'].items():
+        receipt += f"{item['name']} x{item['quantity']}: {format_currency(item['price'] * item['quantity'])}\n"
+    
+    receipt += "=" * 40 + "\n"
+    receipt += f"Subtotal: {format_currency(transaction['subtotal'])}\n"
+    receipt += f"Tax: {format_currency(transaction['tax'])}\n"
+    
+    # Discounts - FIXED: Handle missing discount field
+    discount_amount = transaction.get('discount', 0)
+    if discount_amount != 0:
+        receipt += f"Discount: -{format_currency(abs(discount_amount))}\n"
+    
+    # Loyalty discount - FIXED: Handle missing field
+    loyalty_discount = transaction.get('loyalty_discount', 0)
+    if loyalty_discount != 0:
+        receipt += f"Loyalty Discount: -{format_currency(abs(loyalty_discount))}\n"
+    
+    # Points discount - FIXED: Handle missing field
+    points_discount = transaction.get('points_discount', 0)
+    if points_discount != 0:
+        receipt += f"Points Discount: -{format_currency(abs(points_discount))}\n"
+    
+    receipt += f"Total: {format_currency(transaction['total'])}\n"
+    
+    # Loyalty points - FIXED: Handle missing fields
+    loyalty_points_earned = transaction.get('loyalty_points_earned', 0)
+    if loyalty_points_earned > 0:
+        receipt += f"Loyalty Points Earned: +{loyalty_points_earned}\n"
+    
+    loyalty_points_redeemed = transaction.get('loyalty_points_redeemed', 0)
+    if loyalty_points_redeemed > 0:
+        receipt += f"Loyalty Points Redeemed: -{loyalty_points_redeemed}\n"
+    
+    # Show payment charge if any - FIXED: Handle missing fields
+    payment_charge_amount = transaction.get('payment_charge_amount', 0)
+    payment_charge_percent = transaction.get('payment_charge_percent', 0)
+    if payment_charge_amount > 0:
+        receipt += f"Payment Fee ({payment_charge_percent}%): {format_currency(payment_charge_amount)}\n"
+        receipt += f"Amount Due: {format_currency(transaction['total'] + payment_charge_amount)}\n"
+    
+    receipt += f"Payment Method: {transaction['payment_method']}\n"
+    receipt += f"Amount Tendered: {format_currency(transaction['amount_tendered'])}\n"
+    receipt += f"Change: {format_currency(transaction['change'])}\n"
+    receipt += "=" * 40 + "\n"
+    
+    # Loyalty summary - FIXED: Handle missing customer_id
+    customer_id = transaction.get('customer_id')
+    if customer_id:
+        loyalty_data = load_data(LOYALTY_FILE)
+        customer = loyalty_data.get('customers', {}).get(customer_id, {})
+        if customer:
+            receipt += f"Total Points: {customer.get('points', 0)}\n"
+            receipt += f"Tier: {customer.get('tier', 'Bronze')}\n"
+    
+    if settings.get('receipt_footer', ''):
+        receipt += f"{settings['receipt_footer']}\n"
+        receipt += "=" * 40 + "\n"
+    
+    receipt += "Thank you for shopping with us!\n"
+    
+    return receipt
 def transaction_history():
     st.title("Transaction History")
     
     transactions = load_data(TRANSACTIONS_FILE)
     
+    if not transactions:
+        st.info("No transactions found")
+        return
+    
+    # Ensure all transactions have required fields
+    for transaction_id, transaction in transactions.items():
+        # Add missing fields with default values
+        if 'discount' not in transaction:
+            transaction['discount'] = 0
+        if 'loyalty_discount' not in transaction:
+            transaction['loyalty_discount'] = 0
+        if 'points_discount' not in transaction:
+            transaction['points_discount'] = 0
+        if 'loyalty_points_earned' not in transaction:
+            transaction['loyalty_points_earned'] = 0
+        if 'loyalty_points_redeemed' not in transaction:
+            transaction['loyalty_points_redeemed'] = 0
+        if 'payment_charge_amount' not in transaction:
+            transaction['payment_charge_amount'] = 0
+        if 'payment_charge_percent' not in transaction:
+            transaction['payment_charge_percent'] = 0
+    
+    # Save the updated transactions
+    save_data(transactions, TRANSACTIONS_FILE)
+    
+    # ... rest of the function remains the same
     if not transactions:
         st.info("No transactions found")
         return
@@ -884,17 +1461,22 @@ def print_all_receipts(transactions):
 def dashboard_content():
     st.header("Overview")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)  # Added an extra column
     
     products = load_data(PRODUCTS_FILE)
     inventory = load_data(INVENTORY_FILE)
     transactions = load_data(TRANSACTIONS_FILE)
+    returns = load_data(RETURNS_FILE)
     
     total_products = len(products)
     low_stock_items = sum(1 for item in inventory.values() if item.get('quantity', 0) < item.get('reorder_point', 10))
     
-    today_sales = 0
+    # Calculate today's sales and returns
     today = datetime.date.today()
+    today_sales = 0
+    today_returns = 0
+    
+    # Calculate sales
     for t in transactions.values():
         try:
             trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
@@ -903,9 +1485,54 @@ def dashboard_content():
         except (ValueError, KeyError):
             continue
     
+    # Calculate returns/refunds
+    for r in returns.values():
+        try:
+            return_date = datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if return_date == today:
+                today_returns += r.get('total_refund', 0)
+        except (ValueError, KeyError):
+            continue
+    
+    # Calculate net sales (sales minus returns)
+    today_net_sales = today_sales - today_returns
+    
     col1.metric("Total Products", total_products)
     col2.metric("Low Stock Items", low_stock_items)
-    col3.metric("Today's Sales", format_currency(today_sales))
+    col3.metric("Today's Gross Sales", format_currency(today_sales))
+    col4.metric("Today's Net Sales", format_currency(today_net_sales), 
+               delta=f"Refunds: -{format_currency(today_returns)}")
+    
+    # Additional metrics row for refunds
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Today's Refunds", format_currency(today_returns))
+    
+    # Calculate weekly metrics
+    week_start = today - datetime.timedelta(days=today.weekday())
+    week_sales = 0
+    week_returns = 0
+    
+    for t in transactions.values():
+        try:
+            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if trans_date >= week_start:
+                week_sales += t.get('total', 0)
+        except (ValueError, KeyError):
+            continue
+    
+    for r in returns.values():
+        try:
+            return_date = datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if return_date >= week_start:
+                week_returns += r.get('total_refund', 0)
+        except (ValueError, KeyError):
+            continue
+    
+    week_net_sales = week_sales - week_returns
+    
+    col2.metric("Weekly Gross Sales", format_currency(week_sales))
+    col3.metric("Weekly Net Sales", format_currency(week_net_sales))
+    col4.metric("Weekly Refunds", format_currency(week_returns))
     
     st.subheader("Recent Transactions")
     
@@ -933,7 +1560,67 @@ def dashboard_content():
         st.dataframe(trans_df)
     else:
         st.info("No recent transactions")
+    
+    # Show recent returns
+    st.subheader("Recent Returns/Refunds")
+    
+    def get_return_date(r):
+        try:
+            return datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S")
+        except (ValueError, KeyError):
+            return datetime.datetime.min
+    
+    recent_returns = sorted(returns.values(), 
+                          key=get_return_date, 
+                          reverse=True)[:5]
+    
+    if recent_returns:
+        return_data = []
+        for r in recent_returns:
+            return_data.append({
+                'return_id': r.get('return_id', 'N/A'),
+                'date': r.get('return_date', 'N/A'),
+                'amount': format_currency(r.get('total_refund', 0)),
+                'reason': r.get('reason', 'N/A'),
+                'processed_by': r.get('processed_by', 'N/A')
+            })
+        
+        returns_df = pd.DataFrame(return_data)
+        st.dataframe(returns_df)
+    else:
+        st.info("No recent returns")
 
+def get_sales_metrics(start_date, end_date):
+    """Calculate sales and returns for a given date range"""
+    transactions = load_data(TRANSACTIONS_FILE)
+    returns = load_data(RETURNS_FILE)
+    
+    total_sales = 0
+    total_returns = 0
+    
+    # Calculate sales
+    for t in transactions.values():
+        try:
+            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= trans_date <= end_date:
+                total_sales += t.get('total', 0)
+        except (ValueError, KeyError):
+            continue
+    
+    # Calculate returns
+    for r in returns.values():
+        try:
+            return_date = datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= return_date <= end_date:
+                total_returns += r.get('total_refund', 0)
+        except (ValueError, KeyError):
+            continue
+    
+    return {
+        'gross_sales': total_sales,
+        'returns': total_returns,
+        'net_sales': total_sales - total_returns
+    }
 # POS Terminal - Main Page
 # POS Terminal - Enhanced with Payment Charges and Offers
 def pos_terminal():
@@ -1080,32 +1767,52 @@ def pos_manual_mode():
         if selected_offer:
             st.info(f"Selected: {offer_options[selected_offer]['description']}")
     
-    # Category, subcategory, and brand selection
-    col1, col2, col3 = st.columns(3)
+    # Search and filter options
+    st.subheader("Search & Filter Products")
+    
+    col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
+    
     with col1:
+        # Search by name or barcode
+        search_term = st.text_input("🔍 Search by Name or Barcode", 
+                                  placeholder="Enter product name or barcode...",
+                                  key="manual_search")
+    
+    with col2:
+        # Category filter
         selected_category = st.selectbox(
-            "Select Category", 
+            "Category", 
             [""] + categories.get('categories', []),
             key="manual_category"
         )
-    with col2:
+    
+    with col3:
+        # Subcategory filter (only show if category is selected)
         if selected_category:
             subcategories = categories.get('subcategories', {}).get(selected_category, [])
             selected_subcategory = st.selectbox(
-                "Select Subcategory", 
+                "Subcategory", 
                 [""] + subcategories,
                 key="manual_subcategory"
             )
         else:
             selected_subcategory = None
-    with col3:
-        selected_brand = st.selectbox("Filter by Brand", [""] + brands, key="manual_brand")
     
-    # Display products based on category/subcategory/brand selection
+    with col4:
+        # Brand filter
+        selected_brand = st.selectbox("Brand", [""] + brands, key="manual_brand")
+    
+    # Display products based on search and filters
     st.subheader("Products")
     
     filtered_products = {}
     for barcode, product in products.items():
+        # Check search term
+        matches_search = not search_term or (
+            search_term.lower() in product['name'].lower() or 
+            search_term.lower() in barcode.lower()
+        )
+        
         # Check category
         matches_category = not selected_category or product.get('category') == selected_category
         
@@ -1119,20 +1826,25 @@ def pos_manual_mode():
         stock = inventory.get(barcode, {}).get('quantity', 0)
         has_stock = stock > 0
         
-        if matches_category and matches_subcategory and matches_brand and has_stock:
+        if matches_search and matches_category and matches_subcategory and matches_brand and has_stock:
             filtered_products[barcode] = product
     
     if not filtered_products:
         st.info("No products found with the selected filters")
     else:
-        cols_per_row = 3  # Fewer columns to accommodate quantity inputs
-        product_list = list(filtered_products.items())
+        # Show search results count
+        st.write(f"**Found {len(filtered_products)} product(s)**")
         
-        for i in range(0, len(product_list), cols_per_row):
+        # Sort products by name for better organization
+        sorted_products = sorted(filtered_products.items(), key=lambda x: x[1]['name'])
+        
+        cols_per_row = 3  # Fewer columns to accommodate quantity inputs
+        
+        for i in range(0, len(sorted_products), cols_per_row):
             cols = st.columns(cols_per_row)
             for col_idx in range(cols_per_row):
-                if i + col_idx < len(product_list):
-                    barcode, product = product_list[i + col_idx]
+                if i + col_idx < len(sorted_products):
+                    barcode, product = sorted_products[i + col_idx]
                     with cols[col_idx]:
                         with st.container():
                             # Product image
@@ -1147,6 +1859,7 @@ def pos_manual_mode():
                             # Product name and details
                             st.subheader(product['name'])
                             st.text(f"Price: {format_currency(product['price'])}")
+                            st.text(f"Barcode: {barcode}")
                             
                             # Stock status
                             stock = inventory.get(barcode, {}).get('quantity', 0)
@@ -1189,6 +1902,7 @@ def pos_manual_mode():
                                 st.success(f"Added {quantity} {product['name']} to cart")
     
     display_cart_and_checkout()
+
 def display_cart_and_checkout():
     # Check if we just completed a sale and need to print
     if st.session_state.get('just_completed_sale', False) and st.session_state.get('receipt_to_print'):
@@ -1546,9 +2260,9 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
             'items': cart_items.copy(),
             'subtotal': subtotal,
             'tax': tax_amount,
-            'discount': discount_amount,
-            'loyalty_discount': loyalty_discount,
-            'points_discount': points_discount,
+            'discount': discount_amount,  # Ensure this field exists
+            'loyalty_discount': loyalty_discount,  # Ensure this field exists
+            'points_discount': points_discount,  # Ensure this field exists
             'total': total,
             'payment_method': payment_method,
             'payment_charge_percent': payment_charge_percent,
@@ -7872,792 +8586,490 @@ def reports_analytics():
         st.warning("You don't have permission to access this page")
         return
     
-    st.title("Reports & Analytics")
+    st.title("📊 Sales Analytics Dashboard")
     
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "Sales Reports", 
-        "Inventory Reports", 
-        "Customer Reports", 
-        "Payment Analysis",
-        "Brand Reports",
-        "Return Analysis",
-        "Custom Reports"
+    # Load all data
+    transactions = load_data(TRANSACTIONS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    inventory = load_data(INVENTORY_FILE)
+    returns_data = load_data(RETURNS_FILE)
+    categories_data = load_data(CATEGORIES_FILE)
+    brands_data = load_data(BRANDS_FILE)
+    
+    # Date range selector
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+    with col2:
+        end_date = st.date_input("End Date", value=datetime.date.today())
+    with col3:
+        st.write("")  # Spacer
+        if st.button("🔄 Refresh Data"):
+            st.rerun()
+    
+    # Filter transactions and returns by date
+    filtered_transactions = []
+    for t in transactions.values():
+        try:
+            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= trans_date <= end_date:
+                filtered_transactions.append(t)
+        except (ValueError, KeyError):
+            continue
+    
+    filtered_returns = []
+    for r in returns_data.values():
+        try:
+            return_date = datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= return_date <= end_date:
+                filtered_returns.append(r)
+        except (ValueError, KeyError):
+            continue
+    
+    # Calculate key metrics
+    total_sales = sum(t.get('total', 0) for t in filtered_transactions)
+    total_returns = sum(r.get('total_refund', 0) for r in filtered_returns)
+    net_sales = total_sales - total_returns
+    transaction_count = len(filtered_transactions)
+    avg_transaction_value = total_sales / transaction_count if transaction_count > 0 else 0
+    return_rate = (total_returns / total_sales * 100) if total_sales > 0 else 0
+    
+    # KPI Cards
+    st.subheader("📈 Key Performance Indicators")
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    
+    with kpi1:
+        st.metric("Total Sales", format_currency(total_sales))
+    with kpi2:
+        st.metric("Net Sales", format_currency(net_sales), 
+                 delta=format_currency(-total_returns), delta_color="inverse")
+    with kpi3:
+        st.metric("Transactions", f"{transaction_count:,}")
+    with kpi4:
+        st.metric("Avg. Transaction", format_currency(avg_transaction_value))
+    with kpi5:
+        st.metric("Return Rate", f"{return_rate:.1f}%")
+    
+    # Main dashboard layout
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📅 Sales Overview", 
+        "📦 Product Performance", 
+        "👥 Customer Insights", 
+        "💳 Payment Analysis",
+        "📋 Export Reports"
     ])
     
     with tab1:
-        st.header("Sales Reports")
+        st.header("Sales Overview")
         
-        transactions = load_data(TRANSACTIONS_FILE)
-        if not transactions:
-            st.info("No sales data available")
-        else:
-            report_type = st.selectbox("Sales Report Type", [
-                "Daily Sales",
-                "Weekly Sales",
-                "Monthly Sales",
-                "Product Sales",
-                "Category Sales",
-                "Cashier Performance",
-                "Hourly Sales"
-            ])
+        # Daily sales trend
+        daily_sales = {}
+        daily_returns = {}
+        daily_transactions = {}
+        
+        current_date = start_date
+        while current_date <= end_date:
+            daily_sales[current_date] = 0
+            daily_returns[current_date] = 0
+            daily_transactions[current_date] = 0
+            current_date += datetime.timedelta(days=1)
+        
+        for t in filtered_transactions:
+            try:
+                trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                daily_sales[trans_date] += t.get('total', 0)
+                daily_transactions[trans_date] += 1
+            except:
+                continue
+        
+        for r in filtered_returns:
+            try:
+                return_date = datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+                daily_returns[return_date] += r.get('total_refund', 0)
+            except:
+                continue
+        
+        # Prepare chart data
+        chart_data = pd.DataFrame({
+            'Date': [d.strftime('%Y-%m-%d') for d in daily_sales.keys()],
+            'Sales': list(daily_sales.values()),
+            'Returns': list(daily_returns.values()),
+            'Transactions': list(daily_transactions.values()),
+            'Net Sales': [sales - returns for sales, returns in zip(daily_sales.values(), daily_returns.values())]
+        })
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Daily Sales Trend")
+            st.line_chart(chart_data.set_index('Date')[['Sales', 'Returns', 'Net Sales']])
+        
+        with col2:
+            st.subheader("Transaction Volume")
+            st.bar_chart(chart_data.set_index('Date')['Transactions'])
             
-            # Date range filter
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
-            with col2:
-                end_date = st.date_input("End Date", value=datetime.date.today())
-            
-            # Convert transactions to DataFrame with error handling
-            trans_list = []
-            for t in transactions.values():
-                try:
-                    trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-                    if start_date <= trans_date <= end_date:
-                        trans_list.append({
-                            'date': t['date'],
-                            'transaction_id': t.get('transaction_id', 'N/A'),
-                            'total': t.get('total', 0),
-                            'cashier': t.get('cashier', 'N/A'),
-                            'payment_method': t.get('payment_method', 'N/A'),
-                            'items': t.get('items', {})
-                        })
-                except (ValueError, KeyError, AttributeError):
-                    continue
-            
-            if not trans_list:
-                st.info("No transactions in selected date range")
-            else:
-                trans_df = pd.DataFrame(trans_list)
-                trans_df['date'] = pd.to_datetime(trans_df['date'])
-                
-                if report_type == "Daily Sales":
-                    trans_df['date_group'] = trans_df['date'].dt.date
-                    report_df = trans_df.groupby('date_group').agg({
-                        'total': 'sum',
-                        'transaction_id': 'count'
-                    }).rename(columns={'transaction_id': 'transactions'})
-                    
-                    st.subheader("Daily Sales Summary")
-                    st.dataframe(report_df)
-                    
-                    st.subheader("Daily Sales Chart")
-                    st.line_chart(report_df['total'])
-                    
-                    # Summary stats
-                    total_sales = report_df['total'].sum()
-                    total_transactions = report_df['transactions'].sum()
-                    avg_transaction = total_sales / total_transactions if total_transactions > 0 else 0
-                    
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Total Sales", format_currency(total_sales))
-                    col2.metric("Total Transactions", total_transactions)
-                    col3.metric("Average Transaction", format_currency(avg_transaction))
-                
-                elif report_type == "Weekly Sales":
-                    trans_df['week'] = trans_df['date'].dt.strftime('%Y-%U')
-                    report_df = trans_df.groupby('week').agg({
-                        'total': 'sum',
-                        'transaction_id': 'count'
-                    }).rename(columns={'transaction_id': 'transactions'})
-                    
-                    st.subheader("Weekly Sales Summary")
-                    st.dataframe(report_df)
-                    
-                    st.subheader("Weekly Sales Chart")
-                    st.bar_chart(report_df['total'])
-                
-                elif report_type == "Monthly Sales":
-                    trans_df['month'] = trans_df['date'].dt.strftime('%Y-%m')
-                    report_df = trans_df.groupby('month').agg({
-                        'total': 'sum',
-                        'transaction_id': 'count'
-                    }).rename(columns={'transaction_id': 'transactions'})
-                    
-                    st.subheader("Monthly Sales Summary")
-                    st.dataframe(report_df)
-                    
-                    st.subheader("Monthly Sales Chart")
-                    st.area_chart(report_df['total'])
-                
-                elif report_type == "Product Sales":
-                    products = load_data(PRODUCTS_FILE)
-                    product_sales = {}
-                    
-                    for t in trans_list:
-                        for barcode, item in t.get('items', {}).items():
-                            if barcode not in product_sales:
-                                product_sales[barcode] = {
-                                    'name': products.get(barcode, {}).get('name', 'Unknown'),
-                                    'quantity': 0,
-                                    'revenue': 0.0
-                                }
-                            
-                            product_sales[barcode]['quantity'] += item.get('quantity', 0)
-                            product_sales[barcode]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
-                    
-                    if not product_sales:
-                        st.info("No product sales in selected date range")
-                    else:
-                        sales_df = pd.DataFrame.from_dict(product_sales, orient='index')
-                        sales_df = sales_df.sort_values('revenue', ascending=False)
-                        
-                        st.subheader("Product Sales Summary")
-                        st.dataframe(sales_df)
-                        
-                        st.subheader("Top Selling Products")
-                        top_n = st.slider("Show Top", 1, 20, 5)
-                        st.bar_chart(sales_df.head(top_n)['revenue'])
-                
-                elif report_type == "Category Sales":
-                    products = load_data(PRODUCTS_FILE)
-                    categories = load_data(CATEGORIES_FILE).get('categories', [])
-                    category_sales = {}
-                    
-                    for cat in categories:
-                        category_sales[cat] = {'revenue': 0.0, 'quantity': 0}
-                    
-                    for t in trans_list:
-                        for barcode, item in t.get('items', {}).items():
-                            product = products.get(barcode, {})
-                            category = product.get('category', 'Unknown')
-                            
-                            if category not in category_sales:
-                                category_sales[category] = {'revenue': 0.0, 'quantity': 0}
-                            
-                            category_sales[category]['quantity'] += item.get('quantity', 0)
-                            category_sales[category]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
-                    
-                    if not category_sales:
-                        st.info("No category sales in selected date range")
-                    else:
-                        sales_df = pd.DataFrame.from_dict(category_sales, orient='index')
-                        sales_df = sales_df.sort_values('revenue', ascending=False)
-                        
-                        st.subheader("Category Sales Summary")
-                        st.dataframe(sales_df)
-                        
-                        st.subheader("Sales by Category")
-                        st.bar_chart(sales_df['revenue'])
-                
-                elif report_type == "Cashier Performance":
-                    cashier_performance = {}
-                    
-                    for t in trans_list:
-                        cashier = t.get('cashier', 'Unknown')
-                        if cashier not in cashier_performance:
-                            cashier_performance[cashier] = {
-                                'transactions': 0,
-                                'total_sales': 0.0,
-                                'avg_sale': 0.0
-                            }
-                        
-                        cashier_performance[cashier]['transactions'] += 1
-                        cashier_performance[cashier]['total_sales'] += t.get('total', 0)
-                    
-                    for cashier, data in cashier_performance.items():
-                        if data['transactions'] > 0:
-                            data['avg_sale'] = data['total_sales'] / data['transactions']
-                    
-                    if not cashier_performance:
-                        st.info("No cashier data in selected date range")
-                    else:
-                        performance_df = pd.DataFrame.from_dict(cashier_performance, orient='index')
-                        performance_df = performance_df.sort_values('total_sales', ascending=False)
-                        
-                        st.subheader("Cashier Performance Summary")
-                        st.dataframe(performance_df)
-                        
-                        st.subheader("Sales by Cashier")
-                        st.bar_chart(performance_df['total_sales'])
-                
-                elif report_type == "Hourly Sales":
-                    trans_df['hour'] = trans_df['date'].dt.hour
-                    hourly_sales = trans_df.groupby('hour').agg({
-                        'total': 'sum',
-                        'transaction_id': 'count'
-                    }).rename(columns={'transaction_id': 'transactions'})
-                    
-                    st.subheader("Hourly Sales Pattern")
-                    st.bar_chart(hourly_sales['total'])
-                    
-                    st.subheader("Hourly Transaction Count")
-                    st.bar_chart(hourly_sales['transactions'])
-                
-                # Export option
-                csv = trans_df.to_csv(index=False)
-                st.download_button(
-                    label="Export Sales Data",
-                    data=csv,
-                    file_name=f"sales_report_{start_date}_to_{end_date}.csv",
-                    mime="text/csv"
-                )
+            # Quick stats
+            st.info(f"""
+            **Period Summary:**
+            - Total Days: {len(daily_sales)}
+            - Best Day: {format_currency(max(daily_sales.values()))}
+            - Average Daily: {format_currency(sum(daily_sales.values()) / len(daily_sales))}
+            """)
     
     with tab2:
-        st.header("Inventory Reports")
+        st.header("Product Performance")
         
-        inventory = load_data(INVENTORY_FILE)
-        products = load_data(PRODUCTS_FILE)
+        # Product sales analysis
+        product_sales = {}
+        category_sales = {}
         
-        if not inventory:
-            st.info("No inventory data available")
-        else:
-            report_type = st.selectbox("Inventory Report Type", [
-                "Stock Levels",
-                "Stock Value",
-                "Stock Movement",
-                "Inventory Audit",
-                "Low Stock Alert",
-                "Slow Moving Items"
-            ])
-            
-            if report_type == "Stock Levels":
-                inventory_list = []
-                for barcode, inv_data in inventory.items():
-                    product = products.get(barcode, {'name': 'Unknown'})
-                    inventory_list.append({
-                        'product': product['name'],
-                        'barcode': barcode,
-                        'quantity': inv_data.get('quantity', 0),
-                        'reorder_point': inv_data.get('reorder_point', 10),
-                        'status': 'Low Stock' if inv_data.get('quantity', 0) < inv_data.get('reorder_point', 10) else 'OK'
-                    })
+        for t in filtered_transactions:
+            for barcode, item in t.get('items', {}).items():
+                product = products.get(barcode, {'name': 'Unknown', 'category': 'Uncategorized', 'brand': 'No Brand'})
+                category = product.get('category', 'Uncategorized')
+                brand = product.get('brand', 'No Brand')
                 
-                inv_df = pd.DataFrame(inventory_list)
+                # Product level
+                if barcode not in product_sales:
+                    product_sales[barcode] = {
+                        'name': product['name'],
+                        'category': category,
+                        'brand': brand,
+                        'quantity': 0,
+                        'revenue': 0
+                    }
+                product_sales[barcode]['quantity'] += item.get('quantity', 0)
+                product_sales[barcode]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
                 
-                # Filter options
-                show_low_stock = st.checkbox("Show Only Low Stock Items")
-                if show_low_stock:
-                    inv_df = inv_df[inv_df['status'] == 'Low Stock']
-                
-                st.dataframe(inv_df)
-                
-                # Summary
-                total_items = len(inv_df)
-                low_stock_items = len(inv_df[inv_df['status'] == 'Low Stock'])
-                out_of_stock_items = len(inv_df[inv_df['quantity'] == 0])
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Total Items", total_items)
-                col2.metric("Low Stock Items", low_stock_items)
-                col3.metric("Out of Stock", out_of_stock_items)
-            
-            elif report_type == "Stock Value":
-                value_list = []
-                for barcode, inv_data in inventory.items():
-                    product = products.get(barcode, {'name': 'Unknown', 'cost': 0})
-                    value_list.append({
-                        'product': product['name'],
-                        'barcode': barcode,
-                        'quantity': inv_data.get('quantity', 0),
-                        'unit_cost': product.get('cost', 0),
-                        'total_value': inv_data.get('quantity', 0) * product.get('cost', 0)
-                    })
-                
-                value_df = pd.DataFrame(value_list)
-                total_value = value_df['total_value'].sum()
-                
-                st.write(f"**Total Inventory Value:** {format_currency(total_value)}")
-                st.dataframe(value_df.sort_values('total_value', ascending=False))
-                
-                # Value by category
-                category_value = {}
-                for barcode, inv_data in inventory.items():
-                    product = products.get(barcode, {})
-                    category = product.get('category', 'Unknown')
-                    cost = product.get('cost', 0)
-                    quantity = inv_data.get('quantity', 0)
-                    
-                    category_value[category] = category_value.get(category, 0) + (cost * quantity)
-                
-                if category_value:
-                    cat_df = pd.DataFrame({
-                        'Category': list(category_value.keys()),
-                        'Value': list(category_value.values())
-                    }).sort_values('Value', ascending=False)
-                    
-                    st.subheader("Inventory Value by Category")
-                    st.bar_chart(cat_df.set_index('Category'))
-            
-            elif report_type == "Stock Movement":
-                st.info("Stock movement analysis would show inventory changes over time")
-                # This would require tracking inventory changes history
-                
-            elif report_type == "Inventory Audit":
-                st.info("Generate audit sheets for physical inventory counting")
-                if st.button("Generate Audit Sheet"):
-                    audit_data = []
-                    for barcode, inv_data in inventory.items():
-                        product = products.get(barcode, {'name': 'Unknown'})
-                        audit_data.append({
-                            'Product': product['name'],
-                            'Barcode': barcode,
-                            'System Quantity': inv_data.get('quantity', 0),
-                            'Physical Count': "",
-                            'Variance': "",
-                            'Notes': ""
-                        })
-                    
-                    audit_df = pd.DataFrame(audit_data)
-                    st.dataframe(audit_df)
-                    
-                    csv = audit_df.to_csv(index=False)
-                    st.download_button(
-                        label="Download Audit Sheet",
-                        data=csv,
-                        file_name=f"inventory_audit_{datetime.date.today()}.csv",
-                        mime="text/csv"
-                    )
-            
-            elif report_type == "Low Stock Alert":
-                low_stock_items = []
-                for barcode, inv_data in inventory.items():
-                    if inv_data.get('quantity', 0) < inv_data.get('reorder_point', 10):
-                        product = products.get(barcode, {'name': 'Unknown', 'cost': 0})
-                        low_stock_items.append({
-                            'Product': product['name'],
-                            'Barcode': barcode,
-                            'Current Stock': inv_data.get('quantity', 0),
-                            'Reorder Point': inv_data.get('reorder_point', 10),
-                            'Needed': max(0, inv_data.get('reorder_point', 10) - inv_data.get('quantity', 0)),
-                            'Cost': product.get('cost', 0),
-                            'Value Needed': max(0, inv_data.get('reorder_point', 10) - inv_data.get('quantity', 0)) * product.get('cost', 0)
-                        })
-                
-                if not low_stock_items:
-                    st.success("No low stock items! All inventory levels are adequate.")
-                else:
-                    low_df = pd.DataFrame(low_stock_items)
-                    st.dataframe(low_df.sort_values('Needed', ascending=False))
-                    
-                    total_value_needed = low_df['Value Needed'].sum()
-                    st.metric("Total Value Needed to Reorder", format_currency(total_value_needed))
-            
-            elif report_type == "Slow Moving Items":
-                # This would analyze products with low sales velocity
-                st.info("Slow moving items analysis would identify products with low turnover")
-    
-    with tab3:
-        st.header("Customer Reports")
+                # Category level
+                if category not in category_sales:
+                    category_sales[category] = {'quantity': 0, 'revenue': 0}
+                category_sales[category]['quantity'] += item.get('quantity', 0)
+                category_sales[category]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
         
-        loyalty = load_data(LOYALTY_FILE)
-        customers = loyalty.get('customers', {})
-        transactions = load_data(TRANSACTIONS_FILE)
-        
-        if not customers:
-            st.info("No customer data available")
-        else:
-            report_type = st.selectbox("Customer Report Type", [
-                "Customer Spending",
-                "Loyalty Members",
-                "Customer Segmentation",
-                "New vs Returning Customers"
-            ])
+        if product_sales:
+            # Convert to DataFrames
+            product_df = pd.DataFrame.from_dict(product_sales, orient='index')
+            category_df = pd.DataFrame.from_dict(category_sales, orient='index')
             
             col1, col2 = st.columns(2)
+            
             with col1:
-                start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30), key="cust_start_date")
+                st.subheader("Top 10 Products by Revenue")
+                top_products = product_df.nlargest(10, 'revenue')[['name', 'quantity', 'revenue']]
+                st.dataframe(
+                    top_products.style.format({
+                        'revenue': lambda x: f"${x:,.2f}",
+                        'quantity': lambda x: f"{x:,.0f}"
+                    }),
+                    height=400
+                )
+            
             with col2:
-                end_date = st.date_input("End Date", value=datetime.date.today(), key="cust_end_date")
-            
-            if report_type == "Customer Spending":
-                customer_spending = {}
+                st.subheader("Sales by Category")
+                # Create horizontal bar chart for categories
+                category_chart_data = category_df.sort_values('revenue', ascending=True).tail(10)
+                st.bar_chart(category_chart_data['revenue'])
                 
-                for cust_id, customer in customers.items():
-                    customer_spending[cust_id] = {
-                        'name': customer['name'],
-                        'email': customer['email'],
-                        'phone': customer.get('phone', ''),
+                st.subheader("Top Categories")
+                st.dataframe(
+                    category_df.nlargest(5, 'revenue').style.format({
+                        'revenue': lambda x: f"${x:,.2f}",
+                        'quantity': lambda x: f"{x:,.0f}"
+                    })
+                )
+        else:
+            st.info("No product sales data for the selected period")
+    
+    with tab3:
+        st.header("Customer Insights")
+        
+        # Customer analysis
+        customer_spending = {}
+        for t in filtered_transactions:
+            customer_id = t.get('customer_id')
+            if customer_id:
+                if customer_id not in customer_spending:
+                    customer_spending[customer_id] = {
                         'transactions': 0,
-                        'total_spent': 0.0,
-                        'avg_spend': 0.0,
-                        'last_purchase': None
+                        'total_spent': 0,
+                        'last_purchase': t.get('date', '')
                     }
-                
-                for t in transactions.values():
-                    try:
-                        trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-                        if 'customer_id' in t and start_date <= trans_date <= end_date:
-                            cust_id = t['customer_id']
-                            if cust_id in customer_spending:
-                                customer_spending[cust_id]['transactions'] += 1
-                                customer_spending[cust_id]['total_spent'] += t.get('total', 0)
-                                # Update last purchase date
-                                if not customer_spending[cust_id]['last_purchase'] or trans_date > datetime.datetime.strptime(customer_spending[cust_id]['last_purchase'], "%Y-%m-%d").date():
-                                    customer_spending[cust_id]['last_purchase'] = trans_date.strftime("%Y-%m-%d")
-                    except (ValueError, KeyError, AttributeError):
-                        continue
-                
-                for cust_id, data in customer_spending.items():
-                    if data['transactions'] > 0:
-                        data['avg_spend'] = data['total_spent'] / data['transactions']
-                
-                if not customer_spending:
-                    st.info("No customer spending data in selected date range")
-                else:
-                    spending_df = pd.DataFrame.from_dict(customer_spending, orient='index')
-                    spending_df = spending_df.sort_values('total_spent', ascending=False)
-                    
-                    st.subheader("Customer Spending Summary")
-                    st.dataframe(spending_df)
-                    
-                    st.subheader("Top Spending Customers")
-                    top_n = st.slider("Show Top", 1, 20, 5, key="cust_top")
-                    st.bar_chart(spending_df.head(top_n)['total_spent'])
+                customer_spending[customer_id]['transactions'] += 1
+                customer_spending[customer_id]['total_spent'] += t.get('total', 0)
+        
+        if customer_spending:
+            customer_df = pd.DataFrame.from_dict(customer_spending, orient='index')
+            customer_df['avg_spend'] = customer_df['total_spent'] / customer_df['transactions']
             
-            elif report_type == "Loyalty Members":
-                loyalty_df = pd.DataFrame.from_dict(customers, orient='index')
-                st.dataframe(loyalty_df[['name', 'email', 'phone', 'points', 'tier']].sort_values('points', ascending=False))
-                
-                # Loyalty tier distribution
-                tier_distribution = loyalty_df['tier'].value_counts()
-                st.subheader("Loyalty Tier Distribution")
-                st.bar_chart(tier_distribution)
+            col1, col2 = st.columns(2)
             
-            elif report_type == "Customer Segmentation":
-                st.info("Customer segmentation analysis would group customers by purchasing behavior")
-                # This would involve RFM analysis (Recency, Frequency, Monetary)
+            with col1:
+                st.subheader("Top 5 Customers by Spending")
+                top_customers = customer_df.nlargest(5, 'total_spent')
+                st.dataframe(
+                    top_customers.style.format({
+                        'total_spent': lambda x: f"${x:,.2f}",
+                        'avg_spend': lambda x: f"${x:,.2f}",
+                        'transactions': lambda x: f"{x:,.0f}"
+                    })
+                )
+            
+            with col2:
+                st.subheader("Customer Spending Distribution")
+                # Group customers by spending tiers
+                spending_tiers = {
+                    'VIP (>$500)': len(customer_df[customer_df['total_spent'] > 500]),
+                    'Regular ($100-$500)': len(customer_df[(customer_df['total_spent'] >= 100) & (customer_df['total_spent'] <= 500)]),
+                    'Occasional (<$100)': len(customer_df[customer_df['total_spent'] < 100])
+                }
+                st.bar_chart(spending_tiers)
                 
-            elif report_type == "New vs Returning Customers":
-                st.info("Analysis of new versus returning customers would be implemented here")
+                st.metric("Total Customers", len(customer_df))
+                st.metric("Avg. Customer Value", format_currency(customer_df['total_spent'].mean()))
+        else:
+            st.info("No customer data available for the selected period")
     
     with tab4:
         st.header("Payment Analysis")
         
-        transactions = load_data(TRANSACTIONS_FILE)
-        if not transactions:
-            st.info("No transaction data available")
-        else:
+        # Payment method analysis
+        payment_methods = {}
+        for t in filtered_transactions:
+            method = t.get('payment_method', 'Unknown')
+            if method not in payment_methods:
+                payment_methods[method] = {'count': 0, 'amount': 0}
+            payment_methods[method]['count'] += 1
+            payment_methods[method]['amount'] += t.get('total', 0)
+        
+        if payment_methods:
+            payment_df = pd.DataFrame.from_dict(payment_methods, orient='index')
+            payment_df['avg_amount'] = payment_df['amount'] / payment_df['count']
+            
             col1, col2 = st.columns(2)
+            
             with col1:
-                start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30), key="pay_start_date")
+                st.subheader("Payment Methods Summary")
+                st.dataframe(
+                    payment_df.style.format({
+                        'amount': lambda x: f"${x:,.2f}",
+                        'avg_amount': lambda x: f"${x:,.2f}",
+                        'count': lambda x: f"{x:,.0f}"
+                    })
+                )
+            
             with col2:
-                end_date = st.date_input("End Date", value=datetime.date.today(), key="pay_end_date")
-            
-            payment_methods = {}
-            
-            for t in transactions.values():
-                try:
-                    trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-                    if start_date <= trans_date <= end_date:
-                        method = t.get('payment_method', 'Unknown')
-                        if method not in payment_methods:
-                            payment_methods[method] = {'count': 0, 'total': 0.0}
-                        
-                        payment_methods[method]['count'] += 1
-                        payment_methods[method]['total'] += t.get('total', 0)
-                except (ValueError, KeyError, AttributeError):
-                    continue
-            
-            if not payment_methods:
-                st.info("No payment data in selected date range")
-            else:
-                payment_df = pd.DataFrame.from_dict(payment_methods, orient='index')
-                payment_df = payment_df.sort_values('total', ascending=False)
+                st.subheader("Payment Method Popularity")
+                st.bar_chart(payment_df['count'])
                 
-                st.subheader("Payment Method Summary")
-                st.dataframe(payment_df)
-                
-                st.subheader("Payment Method Distribution")
-                st.bar_chart(payment_df['total'])
-                
-                # Payment method trends over time
-                payment_trends = {}
-                for t in transactions.values():
-                    try:
-                        trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-                        if start_date <= trans_date <= end_date:
-                            method = t.get('payment_method', 'Unknown')
-                            date_key = trans_date.strftime("%Y-%m-%d")
-                            
-                            if date_key not in payment_trends:
-                                payment_trends[date_key] = {}
-                            
-                            payment_trends[date_key][method] = payment_trends[date_key].get(method, 0) + t.get('total', 0)
-                    except (ValueError, KeyError, AttributeError):
-                        continue
-                
-                if payment_trends:
-                    trend_df = pd.DataFrame.from_dict(payment_trends, orient='index').fillna(0)
-                    st.subheader("Payment Method Trends")
-                    st.line_chart(trend_df)
+                st.subheader("Revenue by Payment Method")
+                st.bar_chart(payment_df['amount'])
+        else:
+            st.info("No payment data available")
     
     with tab5:
-        st.header("Brand Reports")
+        st.header("Export Reports")
         
-        brands_data = load_data(BRANDS_FILE)
-        products = load_data(PRODUCTS_FILE)
-        inventory = load_data(INVENTORY_FILE)
-        transactions = load_data(TRANSACTIONS_FILE)
-        brands_list = brands_data.get('brands', [])
-        brand_products = brands_data.get('brand_products', {})
+        st.subheader("Generate Custom Reports")
         
-        if not brands_list:
-            st.info("No brands available for reporting")
-        else:
-            report_type = st.selectbox("Brand Report Type", [
-                "Sales by Brand",
-                "Inventory by Brand",
-                "Product Performance by Brand",
-                "Brand Comparison"
-            ])
-            
-            # Date range for sales reports
-            if report_type in ["Sales by Brand", "Product Performance by Brand"]:
-                col1, col2 = st.columns(2)
-                with col1:
-                    start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30), key="brand_start_date")
-                with col2:
-                    end_date = st.date_input("End Date", value=datetime.date.today(), key="brand_end_date")
-            
-            if report_type == "Sales by Brand":
-                brand_sales = {}
-                for brand in brands_list:
-                    brand_sales[brand] = {'revenue': 0, 'units': 0, 'transactions': 0}
-                
-                for transaction in transactions.values():
-                    try:
-                        trans_date = datetime.datetime.strptime(transaction.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-                        if start_date <= trans_date <= end_date:
-                            has_brand_items = False
-                            for barcode, item in transaction.get('items', {}).items():
-                                product = products.get(barcode, {})
-                                brand = product.get('brand')
-                                if brand and brand in brand_sales:
-                                    brand_sales[brand]['revenue'] += item['price'] * item['quantity']
-                                    brand_sales[brand]['units'] += item['quantity']
-                                    has_brand_items = True
+        report_type = st.selectbox("Select Report Type", [
+            "Sales Detailed Report",
+            "Product Performance Report",
+            "Customer Analysis Report",
+            "Payment Method Report",
+            "Daily Sales Summary"
+        ])
+        
+        # Report customization
+        if report_type == "Sales Detailed Report":
+            selected_columns = st.multiselect(
+                "Select Columns",
+                options=['Date', 'Transaction ID', 'Cashier', 'Payment Method', 'Subtotal', 'Tax', 'Discount', 'Total', 'Items Count'],
+                default=['Date', 'Transaction ID', 'Cashier', 'Total']
+            )
+        elif report_type == "Product Performance Report":
+            selected_columns = st.multiselect(
+                "Select Columns",
+                options=['Product Name', 'Category', 'Brand', 'Quantity Sold', 'Revenue', 'Avg Price'],
+                default=['Product Name', 'Quantity Sold', 'Revenue']
+            )
+        
+        # Format options
+        export_format = st.radio("Export Format", ["CSV", "Excel"], horizontal=True)
+        
+        if st.button("🚀 Generate & Export Report", type="primary"):
+            with st.spinner("Generating report..."):
+                try:
+                    if report_type == "Sales Detailed Report":
+                        report_data = []
+                        for t in filtered_transactions:
+                            report_data.append({
+                                'Date': t.get('date', ''),
+                                'Transaction ID': t.get('transaction_id', ''),
+                                'Cashier': t.get('cashier', ''),
+                                'Payment Method': t.get('payment_method', ''),
+                                'Subtotal': t.get('subtotal', 0),
+                                'Tax': t.get('tax', 0),
+                                'Discount': t.get('discount', 0),
+                                'Total': t.get('total', 0),
+                                'Items Count': len(t.get('items', {}))
+                            })
+                        df = pd.DataFrame(report_data)
+                    
+                    elif report_type == "Product Performance Report":
+                        report_data = []
+                        for barcode, data in product_sales.items():
+                            report_data.append({
+                                'Product Name': data['name'],
+                                'Category': data['category'],
+                                'Brand': data['brand'],
+                                'Quantity Sold': data['quantity'],
+                                'Revenue': data['revenue'],
+                                'Avg Price': data['revenue'] / data['quantity'] if data['quantity'] > 0 else 0
+                            })
+                        df = pd.DataFrame(report_data)
+                    
+                    # Filter selected columns
+                    if selected_columns:
+                        df = df[selected_columns]
+                    
+                    # Display preview
+                    st.subheader("Report Preview")
+                    st.dataframe(df.head(10))
+                    
+                    # Export functionality
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"{report_type.replace(' ', '_')}_{start_date}_to_{end_date}_{timestamp}"
+                    
+                    if export_format == "CSV":
+                        csv = df.to_csv(index=False)
+                        st.download_button(
+                            label="📄 Download CSV",
+                            data=csv,
+                            file_name=f"{filename}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                    
+                    else:  # Excel
+                        excel_buffer = io.BytesIO()
+                        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                            df.to_excel(writer, index=False, sheet_name='Report')
                             
-                            if has_brand_items:
-                                brand_sales[brand]['transactions'] += 1
-                    except (ValueError, KeyError):
-                        continue
-                
-                sales_df = pd.DataFrame.from_dict(brand_sales, orient='index')
-                sales_df = sales_df.sort_values('revenue', ascending=False)
-                
-                st.subheader("Sales by Brand")
-                st.dataframe(sales_df)
-                
-                # Charts
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.bar_chart(sales_df['revenue'])
-                with col2:
-                    st.bar_chart(sales_df['units'])
-            
-            elif report_type == "Inventory by Brand":
-                brand_inventory = {}
-                for brand in brands_list:
-                    brand_inventory[brand] = {'value': 0, 'quantity': 0, 'products': 0, 'avg_cost': 0}
-                
-                for barcode, product in products.items():
-                    brand = product.get('brand')
-                    if brand and brand in brand_inventory:
-                        inv_data = inventory.get(barcode, {})
-                        quantity = inv_data.get('quantity', 0)
-                        cost = product.get('cost', 0)
+                            # Add formatting
+                            workbook = writer.book
+                            worksheet = writer.sheets['Report']
+                            
+                            # Add header format
+                            header_format = workbook.add_format({
+                                'bold': True,
+                                'text_wrap': True,
+                                'valign': 'top',
+                                'fg_color': '#D7E4BC',
+                                'border': 1
+                            })
+                            
+                            # Write column headers with format
+                            for col_num, value in enumerate(df.columns.values):
+                                worksheet.write(0, col_num, value, header_format)
+                            
+                            # Auto-adjust columns width
+                            for i, col in enumerate(df.columns):
+                                max_len = max(
+                                    df[col].astype(str).map(len).max(),
+                                    len(col)
+                                ) + 2
+                                worksheet.set_column(i, i, max_len)
                         
-                        brand_inventory[brand]['value'] += quantity * cost
-                        brand_inventory[brand]['quantity'] += quantity
-                        brand_inventory[brand]['products'] += 1
-                        brand_inventory[brand]['avg_cost'] = brand_inventory[brand]['value'] / quantity if quantity > 0 else 0
-                
-                inv_df = pd.DataFrame.from_dict(brand_inventory, orient='index')
-                inv_df = inv_df.sort_values('value', ascending=False)
-                
-                st.subheader("Inventory by Brand")
-                st.dataframe(inv_df)
-                
-                # Charts
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.bar_chart(inv_df['value'])
-                with col2:
-                    st.bar_chart(inv_df['quantity'])
-            
-            elif report_type == "Product Performance by Brand":
-                selected_brand = st.selectbox("Select Brand", [""] + brands_list)
-                
-                if selected_brand:
-                    product_sales = {}
-                    for barcode in brand_products.get(selected_brand, []):
-                        product_sales[barcode] = {
-                            'name': products.get(barcode, {}).get('name', 'Unknown'),
-                            'revenue': 0,
-                            'units': 0
-                        }
+                        st.download_button(
+                            label="📊 Download Excel",
+                            data=excel_buffer.getvalue(),
+                            file_name=f"{filename}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
                     
-                    for transaction in transactions.values():
-                        try:
-                            trans_date = datetime.datetime.strptime(transaction.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-                            if start_date <= trans_date <= end_date:
-                                for barcode, item in transaction.get('items', {}).items():
-                                    if barcode in product_sales:
-                                        product_sales[barcode]['revenue'] += item['price'] * item['quantity']
-                                        product_sales[barcode]['units'] += item['quantity']
-                        except (ValueError, KeyError):
-                            continue
+                    # Show export summary
+                    st.success(f"✅ Report generated with {len(df)} records")
+                    st.info(f"**Time Period:** {start_date} to {end_date}")
                     
-                    performance_df = pd.DataFrame.from_dict(product_sales, orient='index')
-                    performance_df = performance_df.sort_values('revenue', ascending=False)
-                    
-                    st.subheader(f"Product Performance for {selected_brand}")
-                    st.dataframe(performance_df)
-                    
-                    # Charts
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.bar_chart(performance_df['revenue'])
-                    with col2:
-                        st.bar_chart(performance_df['units'])
-            
-            elif report_type == "Brand Comparison":
-                comparison_metric = st.selectbox("Comparison Metric", ["Revenue", "Inventory Value", "Product Count"])
-                
-                comparison_data = {}
-                for brand in brands_list:
-                    if comparison_metric == "Revenue":
-                        # Calculate revenue for last 30 days
-                        thirty_days_ago = (datetime.datetime.now() - datetime.timedelta(days=30)).date()
-                        revenue = 0
-                        for transaction in transactions.values():
-                            try:
-                                trans_date = datetime.datetime.strptime(transaction.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
-                                if trans_date >= thirty_days_ago:
-                                    for barcode, item in transaction.get('items', {}).items():
-                                        product = products.get(barcode, {})
-                                        if product.get('brand') == brand:
-                                            revenue += item['price'] * item['quantity']
-                            except (ValueError, KeyError):
-                                continue
-                        comparison_data[brand] = revenue
-                    
-                    elif comparison_metric == "Inventory Value":
-                        value = 0
-                        for barcode in brand_products.get(brand, []):
-                            inv_data = inventory.get(barcode, {})
-                            product = products.get(barcode, {})
-                            quantity = inv_data.get('quantity', 0)
-                            cost = product.get('cost', 0)
-                            value += quantity * cost
-                        comparison_data[brand] = value
-                    
-                    elif comparison_metric == "Product Count":
-                        comparison_data[brand] = len(brand_products.get(brand, []))
-                
-                comparison_df = pd.DataFrame.from_dict(comparison_data, orient='index', columns=[comparison_metric])
-                comparison_df = comparison_df.sort_values(comparison_metric, ascending=False)
-                
-                st.subheader(f"Brand Comparison by {comparison_metric}")
-                st.dataframe(comparison_df)
-                
-                st.bar_chart(comparison_df[comparison_metric])
+                except Exception as e:
+                    st.error(f"Error generating report: {str(e)}")
     
-    with tab6:
-        st.header("Return Analysis")
-        
-        returns_data = load_data(RETURNS_FILE)
-        
-        if not returns_data:
-            st.info("No return data available for analysis")
-        else:
-            # Date range
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=90), key="return_start")
-            with col2:
-                end_date = st.date_input("End Date", value=datetime.date.today(), key="return_end")
-            
-            # Filter returns by date
-            filtered_returns = []
-            for return_data in returns_data.values():
-                return_date = datetime.datetime.strptime(return_data['return_date'], "%Y-%m-%d %H:%M:%S").date()
-                if start_date <= return_date <= end_date:
-                    filtered_returns.append(return_data)
-            
-            if not filtered_returns:
-                st.info("No returns in selected date range")
-            else:
-                # Calculate analytics
-                total_returns = len(filtered_returns)
-                total_refund_amount = sum(r['total_refund'] for r in filtered_returns)
-                avg_refund = total_refund_amount / total_returns if total_returns > 0 else 0
-                
-                # Return rate calculation (would need total sales data)
-                st.subheader("Return Summary")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Total Returns", total_returns)
-                col2.metric("Total Refund Amount", format_currency(total_refund_amount))
-                col3.metric("Average Refund", format_currency(avg_refund))
-                
-                # Return reasons analysis
-                return_reasons = {}
-                for return_data in filtered_returns:
-                    reason = return_data['reason']
-                    return_reasons[reason] = return_reasons.get(reason, 0) + 1
-                
-                if return_reasons:
-                    reasons_df = pd.DataFrame({
-                        'Reason': list(return_reasons.keys()),
-                        'Count': list(return_reasons.values())
-                    }).sort_values('Count', ascending=False)
-                    
-                    st.subheader("Returns by Reason")
-                    st.bar_chart(reasons_df.set_index('Reason'))
-                
-                # Return by product type
-                products = load_data(PRODUCTS_FILE)
-                product_returns = {}
-                for return_data in filtered_returns:
-                    for barcode, item in return_data['items'].items():
-                        product_name = products.get(barcode, {}).get('name', 'Unknown')
-                        product_returns[product_name] = product_returns.get(product_name, 0) + item['quantity']
-                
-                if product_returns:
-                    product_df = pd.DataFrame({
-                        'Product': list(product_returns.keys()),
-                        'Return Quantity': list(product_returns.values())
-                    }).sort_values('Return Quantity', ascending=False).head(10)
-                    
-                    st.subheader("Most Returned Products")
-                    st.bar_chart(product_df.set_index('Product'))
+    # Quick insights at the bottom
+    st.markdown("---")
+    st.subheader("📋 Quick Insights Summary")
     
-    with tab7:
-        st.header("Custom Reports")
-        
-        st.info("Create custom reports with specific filters and criteria")
-        
-        with st.form("custom_report_form"):
-            report_name = st.text_input("Report Name", "Custom_Report")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30), key="custom_start")
-            with col2:
-                end_date = st.date_input("End Date", value=datetime.date.today(), key="custom_end")
-            
-            report_type = st.selectbox("Report Type", [
-                "Sales Summary",
-                "Product Performance",
-                "Customer Analysis",
-                "Inventory Status"
-            ])
-            
-            if report_type == "Sales Summary":
-                st.info("Sales summary report would show overall sales performance")
-            elif report_type == "Product Performance":
-                st.info("Product performance report would analyze product sales and profitability")
-            elif report_type == "Customer Analysis":
-                st.info("Customer analysis report would examine customer behavior and value")
-            elif report_type == "Inventory Status":
-                st.info("Inventory status report would show current stock levels and values")
-            
-            if st.form_submit_button("Generate Custom Report"):
-                st.success(f"Custom report '{report_name}' would be generated for {start_date} to {end_date}")
+    insight1, insight2, insight3 = st.columns(3)
+    
+    with insight1:
+        if product_sales:
+            best_seller = max(product_sales.items(), key=lambda x: x[1]['quantity'])
+            st.info(f"**🏆 Best Seller:** {best_seller[1]['name']}\n\n"
+                   f"{best_seller[1]['quantity']} units sold\n"
+                   f"{format_currency(best_seller[1]['revenue'])} revenue")
+    
+    with insight2:
+        if daily_sales:
+            busiest_day = max(daily_sales.items(), key=lambda x: x[1])
+            st.info(f"**📅 Peak Sales Day:** {busiest_day[0].strftime('%b %d')}\n\n"
+                   f"{format_currency(busiest_day[1])} sales\n"
+                   f"{daily_transactions[busiest_day[0]]} transactions")
+    
+    with insight3:
+        if payment_methods:
+            popular_payment = max(payment_methods.items(), key=lambda x: x[1]['count'])
+            st.info(f"**💳 Preferred Payment:** {popular_payment[0]}\n\n"
+                   f"{popular_payment[1]['count']} transactions\n"
+                   f"{format_currency(popular_payment[1]['amount'])} total")
 
 # Shifts Management
 def shifts_management():
+    if is_cashier() and not st.session_state.shift_started:
+        # Cashier view - shift start form in sidebar
+        st.sidebar.subheader("Shift Management")
+        
+        with st.sidebar.form("start_shift_form"):
+            st.write("**Starting Cash**")
+            starting_cash = st.number_input("Enter starting cash amount", min_value=0.0, value=0.0, step=1.0, key="start_cash_input")
+            
+            # Quick amount buttons (using form_submit_button for each)
+            st.write("Quick amounts:")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.form_submit_button("$100", use_container_width=True):
+                    st.session_state.start_cash_input = 100.0
+                    st.rerun()
+            with col2:
+                if st.form_submit_button("$200", use_container_width=True):
+                    st.session_state.start_cash_input = 200.0
+                    st.rerun()
+            with col3:
+                if st.form_submit_button("Clear", use_container_width=True):
+                    st.session_state.start_cash_input = 0.0
+                    st.rerun()
+            
+            # Cash drawer check
+            check_drawer = st.checkbox("I have physically counted the cash drawer", value=False)
+            
+            # Main submit button
+            if st.form_submit_button("🚀 Start New Shift", type="primary", use_container_width=True):
+                if not check_drawer:
+                    st.sidebar.error("Please confirm you've physically counted the cash drawer")
+                else:
+                    shift_id = start_shift()
+                    shifts = load_data(SHIFTS_FILE)
+                    shifts[shift_id]['starting_cash'] = starting_cash
+                    save_data(shifts, SHIFTS_FILE)
+                    st.sidebar.success("Shift started successfully")
+                    st.rerun()
+        
+        # Cash drawer button in sidebar (outside the form)
+        if st.button("💰 FORCE OPEN CASH DRAWER", type="secondary", use_container_width=True):
+           if open_cash_drawer():
+             st.success("Cash drawer opened")
+           else:
+               st.success("Failed to open cash drawer - try manual methods")
+    
     st.title("Shifts Management")
     
     shifts = load_data(SHIFTS_FILE)
@@ -8672,46 +9084,89 @@ def shifts_management():
         if not user_shifts:
             st.info("No shifts recorded")
         else:
-            shift_df = pd.DataFrame(user_shifts)
-            st.dataframe(shift_df[['start_time', 'end_time', 'starting_cash', 'ending_cash', 'status']])
+            # Display shifts
+            for shift in user_shifts:
+                with st.expander(f"Shift {shift['start_time']} - {shift['status']}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Start Time:** {shift['start_time']}")
+                        st.write(f"**End Time:** {shift.get('end_time', 'Still active')}")
+                        st.write(f"**Status:** {shift['status']}")
+                    with col2:
+                        st.write(f"**Starting Cash:** {format_currency(shift.get('starting_cash', 0))}")
+                        st.write(f"**Ending Cash:** {format_currency(shift.get('ending_cash', 0))}")
+                        if shift['status'] == 'completed':
+                            st.write(f"**Net Cash:** {format_currency(shift.get('ending_cash', 0) - shift.get('starting_cash', 0))}")
         
-        # Current shift actions
+        # Current shift management
+        st.header("Current Shift")
+        
         if st.session_state.shift_started:
-            st.subheader("Current Shift")
             current_shift = shifts.get(st.session_state.shift_id, {})
             
-            st.write(f"Started at: {current_shift.get('start_time', 'N/A')}")
-            st.write(f"Starting Cash: {format_currency(current_shift.get('starting_cash', 0))}")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.info(f"**Started at:** {current_shift.get('start_time', 'N/A')}")
+                st.info(f"**Starting Cash:** {format_currency(current_shift.get('starting_cash', 0))}")
             
             # Calculate current cash
             transactions = load_data(TRANSACTIONS_FILE)
             shift_transactions = [t for t in transactions.values() 
                                 if t.get('shift_id') == st.session_state.shift_id and t['payment_method'] == 'Cash']
             total_cash = sum(t['total'] for t in shift_transactions)
-            st.write(f"Current Cash: {format_currency(total_cash)}")
             
-            if st.button("End Shift"):
-                if end_shift():
-                    st.success("Shift ended successfully")
-                    st.rerun()
-                else:
-                    st.error("Failed to end shift")
+            with col2:
+                st.success(f"**Current Cash:** {format_currency(total_cash)}")
+                st.success(f"**Cash Transactions:** {len(shift_transactions)}")
+            
+            with col3:
+                # Quick actions
+                if st.button("📋 Shift Summary", use_container_width=True):
+                    show_shift_summary(current_shift, shift_transactions)
+                
+                if st.button("🔚 End Shift", type="primary", use_container_width=True):
+                    if end_shift():
+                        st.success("Shift ended successfully")
+                        st.rerun()
+                    else:
+                        st.error("Failed to end shift")
+            
+            # Real-time transaction monitoring
+            st.subheader("Live Transactions")
+            if shift_transactions:
+                for i, transaction in enumerate(shift_transactions[-5:]):  # Show last 5 transactions
+                    st.write(f"{transaction['date']} - {format_currency(transaction['total'])} - {transaction['payment_method']}")
+            else:
+                st.info("No transactions yet")
+                
         else:
-            st.info("No active shift")
+            st.info("No active shift. Use the sidebar to start a new shift.")
     
     else:
-        # Manager/Admin view - show all shifts
+        # Manager/Admin view - show all shifts with advanced features
         st.header("All Shifts")
         
         if not shifts:
             st.info("No shifts recorded")
         else:
-            # Filter options
-            col1, col2 = st.columns(2)
+            # Advanced filtering options
+            col1, col2, col3 = st.columns(3)
             with col1:
                 user_filter = st.selectbox("Filter by User", ["All"] + list(set(s['user_id'] for s in shifts.values())))
             with col2:
                 status_filter = st.selectbox("Filter by Status", ["All", "active", "completed"])
+            with col3:
+                date_filter = st.selectbox("Filter by Date", ["All", "Today", "This Week", "This Month", "Custom"])
+            
+            # Custom date range
+            custom_start = None
+            custom_end = None
+            if date_filter == "Custom":
+                custom_col1, custom_col2 = st.columns(2)
+                with custom_col1:
+                    custom_start = st.date_input("Start Date")
+                with custom_col2:
+                    custom_end = st.date_input("End Date")
             
             # Apply filters
             filtered_shifts = shifts.values()
@@ -8720,37 +9175,271 @@ def shifts_management():
             if status_filter != "All":
                 filtered_shifts = [s for s in filtered_shifts if s['status'] == status_filter]
             
+            # Date filtering
+            if date_filter != "All":
+                today = datetime.date.today()
+                if date_filter == "Today":
+                    filtered_shifts = [s for s in filtered_shifts 
+                                    if datetime.datetime.strptime(s['start_time'], "%Y-%m-%d %H:%M:%S").date() == today]
+                elif date_filter == "This Week":
+                    week_start = today - datetime.timedelta(days=today.weekday())
+                    filtered_shifts = [s for s in filtered_shifts 
+                                    if datetime.datetime.strptime(s['start_time'], "%Y-%m-%d %H:%M:%S").date() >= week_start]
+                elif date_filter == "This Month":
+                    month_start = today.replace(day=1)
+                    filtered_shifts = [s for s in filtered_shifts 
+                                    if datetime.datetime.strptime(s['start_time'], "%Y-%m-%d %H:%M:%S").date() >= month_start]
+                elif date_filter == "Custom" and custom_start and custom_end:
+                    filtered_shifts = [s for s in filtered_shifts 
+                                    if custom_start <= datetime.datetime.strptime(s['start_time'], "%Y-%m-%d %H:%M:%S").date() <= custom_end]
+            
             if not filtered_shifts:
                 st.info("No shifts match the filters")
             else:
-                shift_df = pd.DataFrame(filtered_shifts)
-                shift_df = shift_df.sort_values('start_time', ascending=False)
-                st.dataframe(shift_df[['user_id', 'start_time', 'end_time', 'starting_cash', 'ending_cash', 'status']])
+                # Display shifts in a table with more details
+                shift_data = []
+                for shift in filtered_shifts:
+                    shift_data.append({
+                        'User': shift['user_id'],
+                        'Start Time': shift['start_time'],
+                        'End Time': shift.get('end_time', 'Active'),
+                        'Duration': calculate_shift_duration(shift),
+                        'Starting Cash': format_currency(shift.get('starting_cash', 0)),
+                        'Ending Cash': format_currency(shift.get('ending_cash', 0)),
+                        'Net Cash': format_currency(shift.get('ending_cash', 0) - shift.get('starting_cash', 0)),
+                        'Status': shift['status']
+                    })
+                
+                shift_df = pd.DataFrame(shift_data)
+                st.dataframe(shift_df, use_container_width=True)
+                
+                # Summary statistics
+                st.subheader("Shift Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Shifts", len(filtered_shifts))
+                with col2:
+                    active_shifts = len([s for s in filtered_shifts if s['status'] == 'active'])
+                    st.metric("Active Shifts", active_shifts)
+                with col3:
+                    total_cash = sum(s.get('ending_cash', 0) - s.get('starting_cash', 0) for s in filtered_shifts if s['status'] == 'completed')
+                    st.metric("Total Net Cash", format_currency(total_cash))
+                with col4:
+                    avg_shift = total_cash / len([s for s in filtered_shifts if s['status'] == 'completed']) if len([s for s in filtered_shifts if s['status'] == 'completed']) > 0 else 0
+                    st.metric("Avg. Shift Net", format_currency(avg_shift))
         
-        # Shift details
+        # Shift details and management for admin
         if shifts:
-            selected_shift = st.selectbox("View Shift Details", [""] + [f"{s['user_id']} - {s['start_time']}" for s in shifts.values()])
+            st.header("Shift Details & Management")
+            
+            shift_options = [f"{s['user_id']} - {s['start_time']} ({s['status']})" for s in shifts.values()]
+            selected_shift = st.selectbox("Select Shift for Details", [""] + shift_options)
             
             if selected_shift:
-                shift_id = [k for k, v in shifts.items() if f"{v['user_id']} - {v['start_time']}" == selected_shift][0]
+                shift_id = [k for k, v in shifts.items() if f"{v['user_id']} - {v['start_time']} ({v['status']})" == selected_shift][0]
                 shift = shifts[shift_id]
                 
-                st.subheader("Shift Details")
-                st.write(f"User: {shift['user_id']}")
-                st.write(f"Start Time: {shift['start_time']}")
-                st.write(f"End Time: {shift.get('end_time', 'Still active')}")
-                st.write(f"Starting Cash: {format_currency(shift.get('starting_cash', 0))}")
-                st.write(f"Ending Cash: {format_currency(shift.get('ending_cash', 0))}")
-                st.write(f"Status: {shift['status']}")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Shift Information")
+                    st.write(f"**User:** {shift['user_id']}")
+                    st.write(f"**Start Time:** {shift['start_time']}")
+                    st.write(f"**End Time:** {shift.get('end_time', 'Still active')}")
+                    st.write(f"**Status:** {shift['status']}")
+                    st.write(f"**Starting Cash:** {format_currency(shift.get('starting_cash', 0))}")
+                    st.write(f"**Ending Cash:** {format_currency(shift.get('ending_cash', 0))}")
+                    
+                    if shift.get('notes'):
+                        st.write(f"**Notes:** {shift['notes']}")
+                
+                with col2:
+                    st.subheader("Shift Actions")
+                    
+                    if shift['status'] == 'active':
+                        st.warning("This shift is currently active")
+                        
+                        # Admin can force end a shift
+                        if st.button("🛑 Force End Shift", type="secondary"):
+                            if force_end_shift(shift_id):
+                                st.success("Shift ended successfully")
+                                st.rerun()
+                            else:
+                                st.error("Failed to end shift")
+                    
+                    else:
+                        # Show shift summary
+                        transactions = load_data(TRANSACTIONS_FILE)
+                        shift_transactions = [t for t in transactions.values() if t.get('shift_id') == shift_id]
+                        
+                        st.info(f"**Total Transactions:** {len(shift_transactions)}")
+                        st.info(f"**Cash Transactions:** {len([t for t in shift_transactions if t['payment_method'] == 'Cash'])}")
+                        st.info(f"**Non-Cash Transactions:** {len([t for t in shift_transactions if t['payment_method'] != 'Cash'])}")
+                        
+                        if st.button("📊 View Detailed Report"):
+                            generate_shift_report(shift, shift_transactions)
                 
                 # Show transactions for this shift
+                st.subheader("Shift Transactions")
                 transactions = load_data(TRANSACTIONS_FILE)
                 shift_transactions = [t for t in transactions.values() if t.get('shift_id') == shift_id]
                 
                 if shift_transactions:
-                    st.subheader("Shift Transactions")
-                    trans_df = pd.DataFrame(shift_transactions)
-                    st.dataframe(trans_df[['transaction_id', 'date', 'total', 'payment_method']])
+                    trans_data = []
+                    for t in shift_transactions:
+                        trans_data.append({
+                            'Time': t['date'],
+                            'Amount': format_currency(t['total']),
+                            'Payment Method': t['payment_method'],
+                            'Items': len(t.get('items', {})),
+                            'Cashier': t.get('cashier', 'N/A')
+                        })
+                    
+                    trans_df = pd.DataFrame(trans_data)
+                    st.dataframe(trans_df, use_container_width=True)
+                    
+                    # Export option
+                    if st.button("📈 Export Shift Data"):
+                        export_shift_data(shift, shift_transactions)
+                else:
+                    st.info("No transactions for this shift")
+
+
+# Add these missing function definitions:
+
+def calculate_shift_duration(shift):
+    """Calculate the duration of a shift"""
+    try:
+        start_time = datetime.datetime.strptime(shift['start_time'], "%Y-%m-%d %H:%M:%S")
+        if shift.get('end_time'):
+            end_time = datetime.datetime.strptime(shift['end_time'], "%Y-%m-%d %H:%M:%S")
+            duration = end_time - start_time
+            return str(duration)
+        else:
+            return "Still active"
+    except:
+        return "Unknown"
+
+def force_end_shift(shift_id):
+    """Force end a shift (admin function)"""
+    try:
+        shifts = load_data(SHIFTS_FILE)
+        if shift_id in shifts:
+            current_time = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+            shifts[shift_id]['end_time'] = current_time
+            shifts[shift_id]['status'] = 'completed'
+            
+            # Calculate ending cash
+            transactions = load_data(TRANSACTIONS_FILE)
+            shift_transactions = [t for t in transactions.values() 
+                                if t.get('shift_id') == shift_id and t['payment_method'] == 'Cash']
+            total_cash = sum(t['total'] for t in shift_transactions)
+            
+            shifts[shift_id]['ending_cash'] = total_cash
+            save_data(shifts, SHIFTS_FILE)
+            return True
+        return False
+    except Exception as e:
+        st.error(f"Error ending shift: {str(e)}")
+        return False
+
+def show_shift_summary(shift, transactions):
+    """Display a summary of the current shift"""
+    st.subheader("Shift Summary")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write(f"**Start Time:** {shift.get('start_time', 'N/A')}")
+        st.write(f"**Starting Cash:** {format_currency(shift.get('starting_cash', 0))}")
+        st.write(f"**Cash Transactions:** {len([t for t in transactions if t['payment_method'] == 'Cash'])}")
+    
+    with col2:
+        total_cash = sum(t['total'] for t in transactions if t['payment_method'] == 'Cash')
+        st.write(f"**Current Cash:** {format_currency(total_cash)}")
+        st.write(f"**Expected Cash:** {format_currency(shift.get('starting_cash', 0) + total_cash)}")
+        st.write(f"**Total Transactions:** {len(transactions)}")
+    
+    # Transaction breakdown
+    st.subheader("Transaction Breakdown")
+    payment_methods = {}
+    for t in transactions:
+        method = t.get('payment_method', 'Unknown')
+        payment_methods[method] = payment_methods.get(method, 0) + t.get('total', 0)
+    
+    if payment_methods:
+        for method, amount in payment_methods.items():
+            st.write(f"- {method}: {format_currency(amount)}")
+
+def generate_shift_report(shift, transactions):
+    """Generate a detailed shift report"""
+    st.subheader("Detailed Shift Report")
+    
+    # Create a DataFrame for better display
+    report_data = []
+    for t in transactions:
+        report_data.append({
+            'Time': t.get('date', ''),
+            'Amount': format_currency(t.get('total', 0)),
+            'Payment Method': t.get('payment_method', ''),
+            'Items': len(t.get('items', {})),
+            'Cashier': t.get('cashier', 'N/A')
+        })
+    
+    if report_data:
+        df = pd.DataFrame(report_data)
+        st.dataframe(df)
+        
+        # Summary
+        st.subheader("Summary")
+        total_sales = sum(t.get('total', 0) for t in transactions)
+        cash_sales = sum(t.get('total', 0) for t in transactions if t.get('payment_method') == 'Cash')
+        non_cash_sales = total_sales - cash_sales
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Sales", format_currency(total_sales))
+        with col2:
+            st.metric("Cash Sales", format_currency(cash_sales))
+        with col3:
+            st.metric("Non-Cash Sales", format_currency(non_cash_sales))
+
+def export_shift_data(shift, transactions):
+    """Export shift data to CSV"""
+    try:
+        # Prepare data for export
+        export_data = []
+        for t in transactions:
+            export_data.append({
+                'transaction_id': t.get('transaction_id', ''),
+                'date': t.get('date', ''),
+                'cashier': t.get('cashier', ''),
+                'payment_method': t.get('payment_method', ''),
+                'subtotal': t.get('subtotal', 0),
+                'tax': t.get('tax', 0),
+                'discount': t.get('discount', 0),
+                'total': t.get('total', 0),
+                'items_count': len(t.get('items', {}))
+            })
+        
+        # Create DataFrame
+        df = pd.DataFrame(export_data)
+        
+        # Convert to CSV
+        csv = df.to_csv(index=False)
+        
+        # Generate filename
+        filename = f"shift_report_{shift.get('start_time', '').replace(':', '').replace(' ', '_')}.csv"
+        
+        # Download button
+        st.download_button(
+            label="📥 Download Shift Report",
+            data=csv,
+            file_name=filename,
+            mime="text/csv"
+        )
+        
+    except Exception as e:
+        st.error(f"Error exporting shift data: {str(e)}")
 
 # System Settings
 def system_settings():
@@ -9611,7 +10300,7 @@ BACKUP_DIR = "backups"
 def main():
     # Set page config
     st.set_page_config(
-        page_title="Supermarket POS",
+        page_title="ROCKET VAPE POS",
         page_icon="🛒",
         layout="wide",
         initial_sidebar_state="expanded"
