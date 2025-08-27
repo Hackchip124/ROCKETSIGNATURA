@@ -1906,9 +1906,11 @@ def create_order_tab(outdoor_orders_data):
     with col1:
         if st.button("🔄 Clear Cart", key=f"clear_cart_{tab_key}", use_container_width=True):
             st.session_state.outdoor_cart = {}
+            st.rerun()
     with col2:
         if st.button("📋 View Cart", key=f"view_cart_{tab_key}", use_container_width=True):
             st.session_state.show_cart = not st.session_state.get('show_cart', True)
+            st.rerun()
     
     products = load_data(PRODUCTS_FILE)
     inventory = load_data(INVENTORY_FILE)
@@ -2014,13 +2016,18 @@ def create_order_tab(outdoor_orders_data):
                                 'brand': product.get('brand')
                             }
                         st.success(f"Added {quantity} {product['name']}")
+                        st.rerun()
     
-    # Display current cart
+    # Display current cart - FIXED: Create a copy to avoid modification during iteration
     if st.session_state.get('show_cart', True) and st.session_state.outdoor_cart:
         st.subheader("🛒 Current Order Cart")
         
+        # Create a copy of the cart items to avoid modification during iteration
+        cart_items = list(st.session_state.outdoor_cart.items())
+        items_to_remove = []
+        
         # Display cart items
-        for barcode, item in st.session_state.outdoor_cart.items():
+        for barcode, item in cart_items:
             col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
             with col1:
                 st.write(f"**{item['name']}**")
@@ -2030,7 +2037,13 @@ def create_order_tab(outdoor_orders_data):
                 st.write(f"{format_currency(item['price'] * item['quantity'])}")
             with col4:
                 if st.button("❌", key=f"remove_{barcode}_{tab_key}"):
-                    del st.session_state.outdoor_cart[barcode]
+                    items_to_remove.append(barcode)
+        
+        # Remove items after iteration is complete
+        for barcode in items_to_remove:
+            if barcode in st.session_state.outdoor_cart:
+                del st.session_state.outdoor_cart[barcode]
+                st.rerun()
         
         # Calculate totals
         subtotal = sum(item['price'] * item['quantity'] for item in st.session_state.outdoor_cart.values())
@@ -2057,7 +2070,6 @@ def create_order_tab(outdoor_orders_data):
             delivery_charge = delivery_charges['express']
         
         with col2:
-            # FIXED: Removed 'key' parameter from st.metric()
             st.metric("Delivery Charge", format_currency(delivery_charge))
         
         # Payment method
@@ -2082,13 +2094,11 @@ def create_order_tab(outdoor_orders_data):
         st.subheader("💰 Order Summary")
         col1, col2 = st.columns(2)
         with col1:
-            # FIXED: Removed 'key' parameter from st.metric()
             st.metric("Subtotal", format_currency(subtotal))
             st.metric("Delivery", format_currency(delivery_charge))
             if payment_charge_amount > 0:
                 st.metric("Payment Fee", format_currency(payment_charge_amount))
         with col2:
-            # FIXED: Removed 'key' parameter from st.metric()
             st.metric("Total", format_currency(total), delta=None)
         
         # Delivery address
@@ -2134,6 +2144,7 @@ def create_order_tab(outdoor_orders_data):
                     st.session_state.print_requested = True
                     st.session_state.order_to_print = outdoor_orders_data['orders'][success]
                     st.session_state.print_type = "browser_printer"
+                 
 
 def my_orders_tab():
     st.header("My Orders")
@@ -2431,8 +2442,8 @@ def handle_print_requests():
             else:
                 st.warning("⚠️ Could not print automatically. Use download options.")
             
-            # Continue button with unique key
-            if st.button("➡️ Continue", key=f"continue_print_{st.session_state.tab_counter}"):
+            # Continue button with simpler key
+            if st.button("➡️ Continue", key="continue_print_btn"):
                 st.session_state.print_requested = False
                 st.session_state.order_to_print = None
                 st.rerun()
@@ -3116,7 +3127,22 @@ def returns_management():
     
     with tab4:
         return_settings_tab()
-
+def initialize_session_state():
+    # Add these to your session state initialization section
+ if 'tab_counter' not in st.session_state:
+    st.session_state.tab_counter = 0
+ if 'outdoor_cart' not in st.session_state:
+    st.session_state.outdoor_cart = {}
+ if 'current_order_id' not in st.session_state:
+    st.session_state.current_order_id = None
+ if 'print_requested' not in st.session_state:
+    st.session_state.print_requested = False
+ if 'order_to_print' not in st.session_state:
+    st.session_state.order_to_print = None
+ if 'print_type' not in st.session_state:
+    st.session_state.print_type = 'browser_printer'
+ if 'show_cart' not in st.session_state:
+    st.session_state.show_cart = True
 
 def return_settings_tab():
     if not is_manager():
