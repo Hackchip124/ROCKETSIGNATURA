@@ -1142,6 +1142,7 @@ def dashboard():
     # Navigation
     pages = {
         "Dashboard": dashboard_content,
+        "Profit and Loss": profit_loss_statement,
         "Transaction History": transaction_history,
         "POS Terminal": pos_terminal,
         "Product Management": product_management,
@@ -1168,13 +1169,13 @@ def dashboard():
         pages.pop("Backup & Restore", None)
     elif is_cashier():
         pages = {
-            "Dashboard": dashboard_content,
+            "Dashboard": cashier_dashboard,
             "POS Terminal": pos_terminal,
             "Shifts Management": shifts_management,
             "Returns & Refunds": returns_management,
             "Outdoor Sales": outdoor_sales_portal,
             "Loyality Customer":cashier_loyalty_management,
-            "Transaction History": transaction_history
+            "Transaction History": cashier_transaction_history
         }
     
     selected_page = st.sidebar.radio("Go to", list(pages.keys()))
@@ -1634,6 +1635,585 @@ def get_sales_metrics(start_date, end_date):
         'returns': total_returns,
         'net_sales': total_sales - total_returns
     }
+
+# Cahier dash and trans historia 
+def cashier_dashboard():
+    st.header("Cashier Dashboard")
+    
+    # Load data
+    transactions = load_data(TRANSACTIONS_FILE)
+    returns = load_data(RETURNS_FILE)
+    
+    # Calculate today's metrics
+    today = datetime.date.today()
+    today_sales = 0
+    today_returns = 0
+    
+    # Calculate sales
+    for t in transactions.values():
+        try:
+            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if trans_date == today:
+                today_sales += t.get('total', 0)
+        except (ValueError, KeyError):
+            continue
+    
+    # Calculate returns/refunds
+    for r in returns.values():
+        try:
+            return_date = datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if return_date == today:
+                today_returns += r.get('total_refund', 0)
+        except (ValueError, KeyError):
+            continue
+    
+    # Calculate net sales
+    today_net_sales = today_sales - today_returns
+    
+    # Display metrics
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Today's Sales", format_currency(today_sales))
+    col2.metric("Today's Returns", format_currency(today_returns))
+    col3.metric("Net Sales", format_currency(today_net_sales))
+    
+    # Current shift info if active
+    if st.session_state.shift_started:
+        shifts = load_data(SHIFTS_FILE)
+        current_shift = shifts.get(st.session_state.shift_id, {})
+        starting_cash = current_shift.get('starting_cash', 0)
+        
+        # Calculate current cash in drawer
+        shift_transactions = [t for t in transactions.values() 
+                            if t.get('shift_id') == st.session_state.shift_id and t['payment_method'] == 'Cash']
+        current_cash = sum(t['total'] for t in shift_transactions)
+        
+        col4.metric("Cash in Drawer", format_currency(starting_cash + current_cash))
+    
+    # Recent transactions (last 5)
+    st.subheader("Recent Transactions")
+    user_transactions = [t for t in transactions.values() 
+                        if t.get('cashier') == st.session_state.user_info['username']]
+    
+    # Sort by date (newest first)
+    def get_transaction_date(t):
+        try:
+            return datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S")
+        except (ValueError, KeyError):
+            return datetime.datetime.min
+    
+    recent_transactions = sorted(user_transactions, key=get_transaction_date, reverse=True)[:5]
+    
+    if recent_transactions:
+        for t in recent_transactions:
+            with st.expander(f"Sale {t.get('date', 'N/A')} - {format_currency(t.get('total', 0))}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Date:** {t.get('date', 'N/A')}")
+                    st.write(f"**Total:** {format_currency(t.get('total', 0))}")
+                    st.write(f"**Payment:** {t.get('payment_method', 'N/A')}")
+                with col2:
+                    if st.button("View Receipt", key=f"view_{t.get('transaction_id', '')}"):
+                        receipt_text = generate_receipt(t)
+                        st.text_area("Receipt", receipt_text, height=200)
+    else:
+        st.info("No recent transactions")
+
+# Profit And Loss 
+# Add a new function for P&L reports
+def profit_loss_statement():
+    if not is_manager():
+        st.warning("You don't have permission to access this page")
+        return
+    
+    st.title("💰 Profit & Loss Statement")
+    
+    # Date range selection
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        start_date = st.date_input("Start Date", value=datetime.date.today().replace(day=1))
+    with col2:
+        end_date = st.date_input("End Date", value=datetime.date.today())
+    with col3:
+        st.write("")  # Spacer
+        if st.button("🔄 Generate Report"):
+            st.rerun()
+    
+    # Load data
+    transactions = load_data(TRANSACTIONS_FILE)
+    products = load_data(PRODUCTS_FILE)
+    returns = load_data(RETURNS_FILE)
+    inventory = load_data(INVENTORY_FILE)
+    
+    # Filter transactions by date
+    filtered_transactions = []
+    for t in transactions.values():
+        try:
+            trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= trans_date <= end_date:
+                filtered_transactions.append(t)
+        except (ValueError, KeyError):
+            continue
+    
+    # Filter returns by date
+    filtered_returns = []
+    for r in returns.values():
+        try:
+            return_date = datetime.datetime.strptime(r.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= return_date <= end_date:
+                filtered_returns.append(r)
+        except (ValueError, KeyError):
+            continue
+    
+    # Calculate revenue and cost of goods sold
+    total_revenue = 0
+    total_cogs = 0  # Cost of Goods Sold
+    product_profitability = {}
+    category_profitability = {}
+    
+    for transaction in filtered_transactions:
+        for barcode, item in transaction.get('items', {}).items():
+            quantity = item.get('quantity', 0)
+            selling_price = item.get('price', 0)
+            
+            # Get product cost
+            product = products.get(barcode, {})
+            cost_price = product.get('cost', 0)
+            
+            # Calculate revenue and COGS
+            revenue = quantity * selling_price
+            cogs = quantity * cost_price
+            
+            total_revenue += revenue
+            total_cogs += cogs
+            
+            # Track by product
+            if barcode not in product_profitability:
+                product_profitability[barcode] = {
+                    'name': product.get('name', 'Unknown'),
+                    'revenue': 0,
+                    'cogs': 0,
+                    'quantity': 0
+                }
+            
+            product_profitability[barcode]['revenue'] += revenue
+            product_profitability[barcode]['cogs'] += cogs
+            product_profitability[barcode]['quantity'] += quantity
+            
+            # Track by category
+            category = product.get('category', 'Uncategorized')
+            if category not in category_profitability:
+                category_profitability[category] = {
+                    'revenue': 0,
+                    'cogs': 0,
+                    'quantity': 0
+                }
+            
+            category_profitability[category]['revenue'] += revenue
+            category_profitability[category]['cogs'] += cogs
+            category_profitability[category]['quantity'] += quantity
+    
+    # Calculate returns impact
+    returns_impact = 0
+    returns_cogs = 0
+    
+    for return_item in filtered_returns:
+        for barcode, item in return_item.get('items', {}).items():
+            quantity = item.get('quantity', 0)
+            selling_price = item.get('price', 0)
+            
+            # Get product cost
+            product = products.get(barcode, {})
+            cost_price = product.get('cost', 0)
+            
+            returns_impact += quantity * selling_price
+            returns_cogs += quantity * cost_price
+    
+    # Calculate gross profit
+    gross_profit = total_revenue - total_cogs - returns_impact + returns_cogs
+    
+    # Display summary metrics
+    st.subheader("📊 Financial Summary")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Revenue", format_currency(total_revenue))
+    with col2:
+        st.metric("Cost of Goods Sold", format_currency(total_cogs))
+    with col3:
+        st.metric("Returns Impact", format_currency(-returns_impact))
+    with col4:
+        st.metric("Gross Profit", format_currency(gross_profit), 
+                 delta=f"{((gross_profit / total_revenue) * 100):.1f}%" if total_revenue > 0 else "0%")
+    
+    # Gross profit margin
+    gross_margin = (gross_profit / total_revenue * 100) if total_revenue > 0 else 0
+    st.info(f"**Gross Profit Margin:** {gross_margin:.2f}%")
+    
+    # Tabs for detailed views
+    tab1, tab2, tab3, tab4 = st.tabs(["By Category", "By Product", "Trend Analysis", "Export Report"])
+    
+    with tab1:
+        st.subheader("Profitability by Category")
+        
+        if category_profitability:
+            # Prepare category data
+            category_data = []
+            for category, data in category_profitability.items():
+                profit = data['revenue'] - data['cogs']
+                margin = (profit / data['revenue'] * 100) if data['revenue'] > 0 else 0
+                category_data.append({
+                    'Category': category,
+                    'Revenue': data['revenue'],
+                    'COGS': data['cogs'],
+                    'Profit': profit,
+                    'Margin %': margin,
+                    'Quantity': data['quantity']
+                })
+            
+            category_df = pd.DataFrame(category_data)
+            
+            # Sort by profit
+            category_df = category_df.sort_values('Profit', ascending=False)
+            
+            # Display table
+            st.dataframe(
+                category_df.style.format({
+                    'Revenue': lambda x: format_currency(x),
+                    'COGS': lambda x: format_currency(x),
+                    'Profit': lambda x: format_currency(x),
+                    'Margin %': lambda x: f"{x:.1f}%"
+                }),
+                use_container_width=True
+            )
+            
+        else:
+            st.info("No category data available for the selected period")
+    
+    with tab2:
+        st.subheader("Profitability by Product")
+        
+        if product_profitability:
+            # Prepare product data
+            product_data = []
+            for barcode, data in product_profitability.items():
+                profit = data['revenue'] - data['cogs']
+                margin = (profit / data['revenue'] * 100) if data['revenue'] > 0 else 0
+                product_data.append({
+                    'Product': data['name'],
+                    'Barcode': barcode,
+                    'Revenue': data['revenue'],
+                    'COGS': data['cogs'],
+                    'Profit': profit,
+                    'Margin %': margin,
+                    'Quantity': data['quantity'],
+                    'Avg Price': data['revenue'] / data['quantity'] if data['quantity'] > 0 else 0
+                })
+            
+            product_df = pd.DataFrame(product_data)
+            
+            # Sort options
+            sort_by = st.selectbox("Sort By", 
+                                 ['Profit', 'Revenue', 'Margin %', 'Quantity'], 
+                                 key='product_sort')
+            
+            ascending = st.checkbox("Ascending Order", key='product_ascending')
+            
+            product_df = product_df.sort_values(sort_by, ascending=ascending)
+            
+            # Search filter
+            search_term = st.text_input("Search Products", key='product_search')
+            if search_term:
+                product_df = product_df[product_df['Product'].str.contains(search_term, case=False)]
+            
+            # Display table
+            st.dataframe(
+                product_df.style.format({
+                    'Revenue': lambda x: format_currency(x),
+                    'COGS': lambda x: format_currency(x),
+                    'Profit': lambda x: format_currency(x),
+                    'Margin %': lambda x: f"{x:.1f}%",
+                    'Avg Price': lambda x: format_currency(x)
+                }),
+                use_container_width=True,
+                height=400
+            )
+            
+            # Show top and bottom performers
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("🏆 Top 5 Performers")
+                top_5 = product_df.nlargest(5, 'Profit')
+                for _, row in top_5.iterrows():
+                    st.write(f"**{row['Product']}** - {format_currency(row['Profit'])} "
+                           f"({row['Margin %']:.1f}% margin)")
+            
+            with col2:
+                st.subheader("⚠️ Bottom 5 Performers")
+                bottom_5 = product_df.nsmallest(5, 'Profit')
+                for _, row in bottom_5.iterrows():
+                    st.write(f"**{row['Product']}** - {format_currency(row['Profit'])} "
+                           f"({row['Margin %']:.1f}% margin)")
+        else:
+            st.info("No product data available for the selected period")
+    
+    with tab3:
+        st.subheader("Profit Trend Analysis")
+        
+        # Calculate daily trends
+        daily_data = {}
+        current_date = start_date
+        while current_date <= end_date:
+            daily_data[current_date] = {'revenue': 0, 'cogs': 0, 'profit': 0}
+            current_date += datetime.timedelta(days=1)
+        
+        for transaction in filtered_transactions:
+            try:
+                trans_date = datetime.datetime.strptime(transaction.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+                if trans_date in daily_data:
+                    for barcode, item in transaction.get('items', {}).items():
+                        quantity = item.get('quantity', 0)
+                        selling_price = item.get('price', 0)
+                        
+                        product = products.get(barcode, {})
+                        cost_price = product.get('cost', 0)
+                        
+                        daily_data[trans_date]['revenue'] += quantity * selling_price
+                        daily_data[trans_date]['cogs'] += quantity * cost_price
+                        daily_data[trans_date]['profit'] += quantity * (selling_price - cost_price)
+            except:
+                continue
+        
+        # Adjust for returns
+        for return_item in filtered_returns:
+            try:
+                return_date = datetime.datetime.strptime(return_item.get('return_date', ''), "%Y-%m-%d %H:%M:%S").date()
+                if return_date in daily_data:
+                    for barcode, item in return_item.get('items', {}).items():
+                        quantity = item.get('quantity', 0)
+                        selling_price = item.get('price', 0)
+                        
+                        product = products.get(barcode, {})
+                        cost_price = product.get('cost', 0)
+                        
+                        daily_data[return_date]['revenue'] -= quantity * selling_price
+                        daily_data[return_date]['cogs'] -= quantity * cost_price
+                        daily_data[return_date]['profit'] -= quantity * (selling_price - cost_price)
+            except:
+                continue
+        
+        # Prepare trend data
+        dates = sorted(daily_data.keys())
+        revenue_trend = [daily_data[date]['revenue'] for date in dates]
+        profit_trend = [daily_data[date]['profit'] for date in dates]
+        
+        
+        # Show statistics
+        st.subheader("Trend Statistics")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            avg_daily_profit = sum(profit_trend) / len(profit_trend) if profit_trend else 0
+            st.metric("Average Daily Profit", format_currency(avg_daily_profit))
+        
+        with col2:
+            best_day = max(profit_trend) if profit_trend else 0
+            st.metric("Best Day Profit", format_currency(best_day))
+        
+        with col3:
+            worst_day = min(profit_trend) if profit_trend else 0
+            st.metric("Worst Day Profit", format_currency(worst_day))
+    
+    with tab4:
+        st.subheader("Export Profit & Loss Report")
+        
+        # Prepare comprehensive report data
+        report_data = {
+            'Period': f"{start_date} to {end_date}",
+            'Total Revenue': total_revenue,
+            'Cost of Goods Sold': total_cogs,
+            'Returns Impact': -returns_impact,
+            'Gross Profit': gross_profit,
+            'Gross Margin %': gross_margin,
+            'Report Generated': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'Generated By': st.session_state.user_info['username']
+        }
+        
+        # Create detailed DataFrames for export
+        category_export_df = pd.DataFrame([
+            {
+                'Category': cat,
+                'Revenue': data['revenue'],
+                'COGS': data['cogs'],
+                'Profit': data['revenue'] - data['cogs'],
+                'Margin %': ((data['revenue'] - data['cogs']) / data['revenue'] * 100) if data['revenue'] > 0 else 0,
+                'Quantity': data['quantity']
+            }
+            for cat, data in category_profitability.items()
+        ])
+        
+        product_export_df = pd.DataFrame([
+            {
+                'Product': data['name'],
+                'Barcode': barcode,
+                'Revenue': data['revenue'],
+                'COGS': data['cogs'],
+                'Profit': data['revenue'] - data['cogs'],
+                'Margin %': ((data['revenue'] - data['cogs']) / data['revenue'] * 100) if data['revenue'] > 0 else 0,
+                'Quantity': data['quantity']
+            }
+            for barcode, data in product_profitability.items()
+        ])
+        
+        # Export options
+        export_format = st.radio("Export Format", ["Excel", "CSV"], horizontal=True)
+        
+        if st.button("📊 Generate Export", type="primary"):
+            try:
+                if export_format == "Excel":
+                    # Create Excel file with multiple sheets
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                        # Summary sheet
+                        summary_df = pd.DataFrame(list(report_data.items()), columns=['Metric', 'Value'])
+                        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                        
+                        # Category sheet
+                        category_export_df.to_excel(writer, sheet_name='By Category', index=False)
+                        
+                        # Product sheet
+                        product_export_df.to_excel(writer, sheet_name='By Product', index=False)
+                        
+                        # Formatting
+                        workbook = writer.book
+                        
+                        # Currency format
+                        currency_format = workbook.add_format({'num_format': '$#,##0.00'})
+                        percent_format = workbook.add_format({'num_format': '0.00%'})
+                        
+                        # Apply formats
+                        for sheet_name in writer.sheets:
+                            worksheet = writer.sheets[sheet_name]
+                            
+                            if sheet_name == 'Summary':
+                                worksheet.set_column('A:A', 20)
+                                worksheet.set_column('B:B', 15, currency_format)
+                            else:
+                                worksheet.set_column('A:A', 30)
+                                worksheet.set_column('B:B', 15)
+                                worksheet.set_column('C:E', 15, currency_format)
+                                worksheet.set_column('F:F', 10, percent_format)
+                                worksheet.set_column('G:G', 10)
+                    
+                    st.download_button(
+                        label="📥 Download Excel Report",
+                        data=excel_buffer.getvalue(),
+                        file_name=f"profit_loss_report_{start_date}_{end_date}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                else:  # CSV format
+                    # Create ZIP with multiple CSV files
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+                        # Summary CSV
+                        summary_df = pd.DataFrame(list(report_data.items()), columns=['Metric', 'Value'])
+                        zip_file.writestr('summary.csv', summary_df.to_csv(index=False))
+                        
+                        # Category CSV
+                        zip_file.writestr('by_category.csv', category_export_df.to_csv(index=False))
+                        
+                        # Product CSV
+                        zip_file.writestr('by_product.csv', product_export_df.to_csv(index=False))
+                    
+                    st.download_button(
+                        label="📥 Download CSV Report (ZIP)",
+                        data=zip_buffer.getvalue(),
+                        file_name=f"profit_loss_report_{start_date}_{end_date}.zip",
+                        mime="application/zip"
+                    )
+                
+                st.success("Report generated successfully!")
+                
+            except Exception as e:
+                st.error(f"Error generating report: {str(e)}")
+
+# Cashier Transaction History - Simplified version
+def cashier_transaction_history():
+    st.title("My Transaction History")
+    
+    transactions = load_data(TRANSACTIONS_FILE)
+    
+    # Filter to only show current cashier's transactions
+    user_transactions = {k: v for k, v in transactions.items() 
+                        if v.get('cashier') == st.session_state.user_info['username']}
+    
+    if not user_transactions:
+        st.info("No transactions found")
+        return
+    
+    # Simple date filter
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=7))
+    with col2:
+        end_date = st.date_input("End Date", value=datetime.date.today())
+    
+    # Apply date filter
+    filtered_transactions = []
+    for transaction_id, transaction in user_transactions.items():
+        try:
+            trans_date = datetime.datetime.strptime(transaction.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
+            if start_date <= trans_date <= end_date:
+                filtered_transactions.append((transaction_id, transaction))
+        except (ValueError, KeyError):
+            continue
+    
+    # Sort by date (newest first)
+    filtered_transactions.sort(key=lambda x: x[1].get('date', ''), reverse=True)
+    
+    if not filtered_transactions:
+        st.info("No transactions match the selected filters")
+        return
+    
+    st.write(f"**Found {len(filtered_transactions)} transactions**")
+    
+    # Display transactions
+    for transaction_id, transaction in filtered_transactions:
+        with st.expander(f"Transaction #{transaction_id} - {transaction.get('date', 'Unknown date')} - {format_currency(transaction.get('total', 0))}"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write(f"**Date:** {transaction.get('date', 'N/A')}")
+                st.write(f"**Payment Method:** {transaction.get('payment_method', 'N/A')}")
+                
+                if transaction.get('customer_id'):
+                    loyalty_data = load_data(LOYALTY_FILE)
+                    customer = loyalty_data.get('customers', {}).get(transaction['customer_id'], {})
+                    if customer:
+                        st.write(f"**Customer:** {customer.get('name', 'N/A')}")
+            
+            with col2:
+                st.write(f"**Subtotal:** {format_currency(transaction.get('subtotal', 0))}")
+                st.write(f"**Tax:** {format_currency(transaction.get('tax', 0))}")
+                
+                if transaction.get('discount', 0) > 0:
+                    st.write(f"**Discount:** -{format_currency(transaction.get('discount', 0))}")
+                
+                st.write(f"**Total:** {format_currency(transaction.get('total', 0))}")
+            
+            # Items list
+            st.write("**Items:**")
+            for barcode, item in transaction.get('items', {}).items():
+                st.write(f"- {item.get('name', 'Unknown')} x{item.get('quantity', 0)} @ {format_currency(item.get('price', 0))} each")
+            
+            # Reprint option only (no export)
+            if st.button("🖨️ Reprint Receipt", key=f"print_{transaction_id}"):
+                receipt_text = generate_receipt(transaction)
+                if print_receipt(receipt_text):
+                    st.success("Receipt printed successfully")
+                else:
+                    st.error("Failed to print receipt")
+
 # POS Terminal - Main Page
 # POS Terminal - Enhanced with Payment Charges and Offers
 def pos_terminal():
