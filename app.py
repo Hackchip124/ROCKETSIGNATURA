@@ -2497,63 +2497,6 @@ def pos_manual_mode():
     display_cart_and_checkout()
 
 def display_cart_and_checkout():
-    # Check if we just completed a sale and need to print
-    if st.session_state.get('just_completed_sale', False) and st.session_state.get('receipt_to_print'):
-        receipt_text = st.session_state.receipt_to_print
-        # Clear the state first
-        st.session_state.just_completed_sale = False
-        st.session_state.receipt_to_print = None
-        
-        # Use JavaScript to print the receipt
-        js_code = f"""
-        <script>
-        function printReceipt() {{
-            const printWindow = window.open('', '_blank', 'width=400,height=600');
-            const htmlContent = `
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Receipt</title>
-                <style>
-                    body {{
-                        font-family: 'Courier New', monospace;
-                        font-size: 12px;
-                        padding: 10px;
-                        line-height: 1.2;
-                        white-space: pre-wrap;
-                    }}
-                    @media print {{
-                        body {{
-                            margin: 0;
-                            padding: 10px;
-                        }}
-                    }}
-                </style>
-            </head>
-            <body>
-                <pre>{receipt_text}</pre>
-            </body>
-            </html>
-            `;
-            
-            printWindow.document.write(htmlContent);
-            printWindow.document.close();
-            
-            printWindow.onload = function() {{
-                printWindow.print();
-                setTimeout(() => printWindow.close(), 500);
-            }};
-        }}
-        
-        // Print immediately when page loads
-        window.onload = function() {{
-            setTimeout(printReceipt, 100);
-        }};
-        </script>
-        """
-        
-        st.components.v1.html(js_code, height=0)
-        return  # Early return to avoid showing the rest of the cart
     settings = load_data(SETTINGS_FILE)
     payment_charges = settings.get('payment_charges', {
         "cash": 0.0,
@@ -2655,9 +2598,9 @@ def display_cart_and_checkout():
                 final_total -= discount_amount
                 st.write(f"Discount Applied: -{format_currency(discount_amount)}")
         
-        # LOYALTY SECTION - Separate from the main sale processing
+        # LOYALTY SECTION - Integrated perfectly
         st.markdown("---")
-        st.subheader("Loyalty Program")
+        st.subheader("🎯 Loyalty Program")
         
         loyalty_data = load_data(LOYALTY_FILE)
         customers = loyalty_data.get('customers', {})
@@ -2670,7 +2613,7 @@ def display_cart_and_checkout():
             with col2:
                 customer_id_input = st.text_input("Customer ID", key="customer_id_input")
             
-            if st.form_submit_button("Find Customer", use_container_width=True):
+            if st.form_submit_button("🔍 Find Customer", use_container_width=True):
                 customer_found = None
                 customer_id = None
                 
@@ -2690,15 +2633,23 @@ def display_cart_and_checkout():
                 if customer_found:
                     st.session_state.loyalty_customer_id = customer_id
                     st.session_state.loyalty_customer_data = customer_found
-                    st.success(f"Customer found: {customer_found.get('name', 'Unknown')}")
+                    st.success(f"✅ Customer found: {customer_found.get('name', 'Unknown')}")
                 else:
                     st.session_state.loyalty_customer_id = None
                     st.session_state.loyalty_customer_data = None
-                    st.warning("Customer not found")
+                    st.warning("❌ Customer not found")
         
         # Display customer info if found
         if st.session_state.loyalty_customer_data:
             customer = st.session_state.loyalty_customer_data
+            
+            # Clear customer button
+            if st.button("🗑️ Clear Customer", key="clear_loyalty_customer", use_container_width=True):
+                st.session_state.loyalty_customer_id = None
+                st.session_state.loyalty_points_to_redeem = 0
+                st.session_state.loyalty_customer_data = None
+                st.rerun()
+            
             st.info(f"**{customer.get('name', 'Unknown')}** - {customer.get('tier', 'Bronze')} Tier")
             st.info(f"Points: {customer.get('points', 0)}")
             
@@ -2719,13 +2670,13 @@ def display_cart_and_checkout():
                 if st.session_state.loyalty_points_to_redeem > 0:
                     points_discount = st.session_state.loyalty_points_to_redeem * points_value
                     final_total -= points_discount
-                    st.success(f"Redeeming {st.session_state.loyalty_points_to_redeem} points: -{format_currency(points_discount)}")
+                    st.success(f"🎉 Redeeming {st.session_state.loyalty_points_to_redeem} points: -{format_currency(points_discount)}")
         
         # Calculate loyalty points to earn (for display only)
         if st.session_state.loyalty_customer_id:
             points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
             loyalty_points_earned = int(final_total * points_per_dollar)
-            st.info(f"Points to earn: {loyalty_points_earned}")
+            st.info(f"📈 Points to earn: {loyalty_points_earned}")
         
         # Apply tier discount if customer has a tier
         loyalty_discount_applied = 0
@@ -2737,14 +2688,14 @@ def display_cart_and_checkout():
             if tier_discount > 0:
                 loyalty_discount_applied = final_total * tier_discount
                 final_total -= loyalty_discount_applied
-                st.success(f"Tier discount ({current_tier}): -{format_currency(loyalty_discount_applied)}")
+                st.success(f"🏆 Tier discount ({current_tier}): -{format_currency(loyalty_discount_applied)}")
         
         st.markdown("---")
         
         # PAYMENT SECTION
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Summary")
+            st.subheader("💰 Summary")
             st.write(f"Subtotal: {format_currency(subtotal)}")
             st.write(f"Tax ({tax_rate*100}%): {format_currency(tax_amount)}")
             if total_after_offers != total_before_offers:
@@ -2756,7 +2707,7 @@ def display_cart_and_checkout():
             st.write(f"**Total: {format_currency(final_total)}**")
         
         with col2:
-            st.subheader("Payment")
+            st.subheader("💳 Payment")
             payment_method = st.selectbox("Payment Method", 
                                         ["Cash", "Credit Card", "Debit Card", "Mobile Payment", "Bank Transfer", "International Card"])
             
@@ -2768,16 +2719,16 @@ def display_cart_and_checkout():
             total_with_payment_charge = final_total + payment_charge_amount
             
             if payment_charge_percent > 0:
-                st.info(f"Payment Fee ({payment_charge_percent}%): +{format_currency(payment_charge_amount)}")
+                st.info(f"💸 Payment Fee ({payment_charge_percent}%): +{format_currency(payment_charge_amount)}")
                 st.write(f"**Amount Due: {format_currency(total_with_payment_charge)}**")
             
             amount_tendered = st.number_input("Amount Tendered", min_value=0.0, value=total_with_payment_charge, step=1.0)
             
-            if st.button("Complete Sale", type="primary", use_container_width=True):
+            if st.button("✅ Complete Sale", type="primary", use_container_width=True):
                 if amount_tendered < total_with_payment_charge:
-                    st.error("Amount tendered is less than total")
+                    st.error("❌ Amount tendered is less than total")
                 else:
-                    # Process the sale
+                    # Process the sale with loyalty integration
                     success = process_sale(
                         st.session_state.cart,
                         payment_method,
@@ -2791,7 +2742,7 @@ def display_cart_and_checkout():
                     )
                     
                     if success:
-                        st.success("Sale completed successfully!")
+                        st.success("🎉 Sale completed successfully!")
                         # Reset cart and loyalty state
                         st.session_state.cart = {}
                         st.session_state.selected_offer = None
@@ -2801,7 +2752,7 @@ def display_cart_and_checkout():
                         st.rerun()
                     
     else:
-        st.info("Cart is empty")
+        st.info("🛒 Cart is empty")
 
 def process_sale(cart_items, payment_method, payment_charge_percent, payment_charge_amount, amount_tendered, selected_offer=None, customer_id=None, points_to_redeem=0, loyalty_discount=0):
     try:
@@ -2824,10 +2775,11 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
             # Handle offer discount (this would be calculated based on the offer type)
             pass
         
-        # Apply loyalty discount
-        total -= loyalty_discount
+        # Apply loyalty discount (NEW)
+        if loyalty_discount > 0:
+            total -= loyalty_discount
         
-        # Apply points redemption
+        # Apply points redemption (NEW)
         points_value = loyalty_data.get('settings', {}).get('points_value', 0.01)
         points_discount = points_to_redeem * points_value
         total -= points_discount
@@ -2839,13 +2791,13 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
         # Generate transaction ID
         transaction_id = generate_short_id()
         
-        # Calculate loyalty points to earn
+        # Calculate loyalty points to earn (NEW)
         loyalty_points_earned = 0
         if customer_id:
             points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
             loyalty_points_earned = int(total * points_per_dollar)
         
-        # Create transaction record
+        # Create transaction record (UPDATED with loyalty fields)
         transaction = {
             'transaction_id': transaction_id,
             'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2853,9 +2805,9 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
             'items': cart_items.copy(),
             'subtotal': subtotal,
             'tax': tax_amount,
-            'discount': discount_amount,  # Ensure this field exists
-            'loyalty_discount': loyalty_discount,  # Ensure this field exists
-            'points_discount': points_discount,  # Ensure this field exists
+            'discount': discount_amount,
+            'loyalty_discount': loyalty_discount,  # NEW
+            'points_discount': points_discount,    # NEW
             'total': total,
             'payment_method': payment_method,
             'payment_charge_percent': payment_charge_percent,
@@ -2863,9 +2815,9 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
             'amount_tendered': amount_tendered,
             'change': change,
             'shift_id': st.session_state.shift_id if st.session_state.shift_started else None,
-            'customer_id': customer_id,
-            'loyalty_points_earned': loyalty_points_earned,
-            'loyalty_points_redeemed': points_to_redeem
+            'customer_id': customer_id,  # NEW
+            'loyalty_points_earned': loyalty_points_earned,  # NEW
+            'loyalty_points_redeemed': points_to_redeem  # NEW
         }
         
         # Add offer information if applied
@@ -2882,7 +2834,7 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
                 st.error(f"Product {barcode} not found in inventory")
                 return False
         
-        # Update loyalty points
+        # Update loyalty points and customer data (NEW)
         if customer_id and customer_id in customers:
             # Calculate net points change
             net_points_change = loyalty_points_earned - points_to_redeem
@@ -2927,12 +2879,12 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
         save_data(transactions, TRANSACTIONS_FILE)
         save_data(inventory, INVENTORY_FILE)
         
-        # Generate and print receipt - THIS IS THE KEY CHANGE
+        # Generate and print receipt
         receipt_text = generate_receipt(transaction)
-        
-        # Store receipt in session state for printing after rerun
-        st.session_state.receipt_to_print = receipt_text
-        st.session_state.just_completed_sale = True
+        if print_receipt(receipt_text):
+            st.success("Receipt printed successfully")
+        else:
+            st.error("Failed to print receipt")
         
         # Open cash drawer if enabled
         if payment_method == "Cash":
@@ -2943,7 +2895,6 @@ def process_sale(cart_items, payment_method, payment_charge_percent, payment_cha
     except Exception as e:
         st.error(f"Error processing sale: {str(e)}")
         return False
-
 
 def generate_receipt(transaction):
     settings = load_data(SETTINGS_FILE)
@@ -2962,15 +2913,6 @@ def generate_receipt(transaction):
     receipt += f"Date: {transaction['date']}\n"
     receipt += f"Cashier: {transaction['cashier']}\n"
     receipt += f"Transaction ID: {transaction['transaction_id']}\n"
-    
-    # Customer info if available
-    if transaction.get('customer_id'):
-        loyalty_data = load_data(LOYALTY_FILE)
-        customer = loyalty_data.get('customers', {}).get(transaction['customer_id'], {})
-        if customer:
-            receipt += f"Customer: {customer.get('name', 'N/A')}\n"
-            receipt += f"Loyalty ID: {transaction['customer_id']}\n"
-    
     receipt += "=" * 40 + "\n"
     
     # Items
@@ -2981,36 +2923,49 @@ def generate_receipt(transaction):
     receipt += f"Subtotal: {format_currency(transaction['subtotal'])}\n"
     receipt += f"Tax: {format_currency(transaction['tax'])}\n"
     
-    # Discounts
-    if transaction.get('discount', 0) != 0:
-        receipt += f"Discount: -{format_currency(abs(transaction['discount']))}\n"
+    # Discounts - FIXED: Handle missing discount field
+    discount_amount = transaction.get('discount', 0)
+    if discount_amount != 0:
+        receipt += f"Discount: -{format_currency(abs(discount_amount))}\n"
     
-    if transaction.get('loyalty_discount', 0) != 0:
-        receipt += f"Loyalty Discount: -{format_currency(abs(transaction['loyalty_discount']))}\n"
+    # Loyalty discount - FIXED: Handle missing field
+    loyalty_discount = transaction.get('loyalty_discount', 0)
+    if loyalty_discount != 0:
+        receipt += f"Loyalty Discount: -{format_currency(abs(loyalty_discount))}\n"
+    
+    # Points discount - FIXED: Handle missing field
+    points_discount = transaction.get('points_discount', 0)
+    if points_discount != 0:
+        receipt += f"Points Discount: -{format_currency(abs(points_discount))}\n"
     
     receipt += f"Total: {format_currency(transaction['total'])}\n"
     
-    # Loyalty points
-    if transaction.get('loyalty_points_earned', 0) > 0:
-        receipt += f"Loyalty Points Earned: +{transaction['loyalty_points_earned']}\n"
+    # Loyalty points - FIXED: Handle missing fields
+    loyalty_points_earned = transaction.get('loyalty_points_earned', 0)
+    if loyalty_points_earned > 0:
+        receipt += f"Loyalty Points Earned: +{loyalty_points_earned}\n"
     
-    if transaction.get('loyalty_points_redeemed', 0) > 0:
-        receipt += f"Loyalty Points Redeemed: -{transaction['loyalty_points_redeemed']}\n"
+    loyalty_points_redeemed = transaction.get('loyalty_points_redeemed', 0)
+    if loyalty_points_redeemed > 0:
+        receipt += f"Loyalty Points Redeemed: -{loyalty_points_redeemed}\n"
     
-    # Show payment charge if any
-    if transaction.get('payment_charge_amount', 0) > 0:
-        receipt += f"Payment Fee ({transaction.get('payment_charge_percent', 0)}%): {format_currency(transaction['payment_charge_amount'])}\n"
-        receipt += f"Amount Due: {format_currency(transaction['total'] + transaction['payment_charge_amount'])}\n"
+    # Show payment charge if any - FIXED: Handle missing fields
+    payment_charge_amount = transaction.get('payment_charge_amount', 0)
+    payment_charge_percent = transaction.get('payment_charge_percent', 0)
+    if payment_charge_amount > 0:
+        receipt += f"Payment Fee ({payment_charge_percent}%): {format_currency(payment_charge_amount)}\n"
+        receipt += f"Amount Due: {format_currency(transaction['total'] + payment_charge_amount)}\n"
     
     receipt += f"Payment Method: {transaction['payment_method']}\n"
     receipt += f"Amount Tendered: {format_currency(transaction['amount_tendered'])}\n"
     receipt += f"Change: {format_currency(transaction['change'])}\n"
     receipt += "=" * 40 + "\n"
     
-    # Loyalty summary
-    if transaction.get('customer_id'):
+    # Loyalty summary - FIXED: Handle missing customer_id
+    customer_id = transaction.get('customer_id')
+    if customer_id:
         loyalty_data = load_data(LOYALTY_FILE)
-        customer = loyalty_data.get('customers', {}).get(transaction['customer_id'], {})
+        customer = loyalty_data.get('customers', {}).get(customer_id, {})
         if customer:
             receipt += f"Total Points: {customer.get('points', 0)}\n"
             receipt += f"Tier: {customer.get('tier', 'Bronze')}\n"
@@ -4440,6 +4395,12 @@ def initialize_session_state():
     st.session_state.tab_counter = 0
  if 'outdoor_cart' not in st.session_state:
     st.session_state.outdoor_cart = {}
+ if 'loyalty_customer_id' not in st.session_state:
+    st.session_state.loyalty_customer_id = None
+ if 'loyalty_points_to_redeem' not in st.session_state:
+    st.session_state.loyalty_points_to_redeem = 0
+ if 'loyalty_customer_data' not in st.session_state:
+    st.session_state.loyalty_customer_data = None
  if 'current_order_id' not in st.session_state:
     st.session_state.current_order_id = None
  if 'print_requested' not in st.session_state:
@@ -8762,206 +8723,590 @@ def apply_offers_to_cart(cart_items, current_total):
     return max(total_after_offers, 0)  # Ensure total doesn't go negative
                 
 # Loyalty Program Management
+# LOYALTY PROGRAM MANAGEMENT - COMPLETE IMPLEMENTATION
 def loyalty_management():
     if not is_manager():
         st.warning("You don't have permission to access this page")
         return
     
-    st.title("Loyalty Program Management")
+    st.title("🎯 Loyalty Program Management")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Tier Management", "Customer Points", "Rewards", "Bulk Import"])
+    tab1, tab2, tab3 = st.tabs(["Tier Management", "Customer Management",  "Program Settings"])
     
     with tab1:
-        st.header("Loyalty Tiers")
-        
-        loyalty = load_data(LOYALTY_FILE)
-        tiers = loyalty.get('tiers', {})
-        
-        st.subheader("Current Tiers")
-        if not tiers:
-            st.info("No loyalty tiers defined")
-        else:
-            tier_df = pd.DataFrame.from_dict(tiers, orient='index')
-            tier_df['discount'] = tier_df['discount'].apply(lambda x: f"{x*100}%")
-            st.dataframe(tier_df)
-        
-        st.subheader("Add/Edit Tier")
-        with st.form("tier_form"):
-            tier_name = st.text_input("Tier Name*")
-            min_points = st.number_input("Minimum Points Required*", min_value=0, value=1000, step=1)
-            discount = st.number_input("Discount Percentage*", min_value=0, max_value=100, value=5, step=1)
-            
-            submit_button = st.form_submit_button("Save Tier")
-            
-            if submit_button:
-                if not tier_name:
-                    st.error("Tier name is required")
-                else:
-                    tiers[tier_name] = {
-                        'min_points': min_points,
-                        'discount': discount / 100  # Store as decimal
-                    }
-                    loyalty['tiers'] = tiers
-                    save_data(loyalty, LOYALTY_FILE)
-                    st.success("Tier saved successfully")
+        loyalty_tier_management()
     
     with tab2:
-        st.header("Customer Points")
-        
-        loyalty = load_data(LOYALTY_FILE)
-        customers = loyalty.get('customers', {})
-        
-        st.subheader("Customer List")
-        if not customers:
-            st.info("No customers in loyalty program")
-        else:
-            customer_df = pd.DataFrame.from_dict(customers, orient='index')
-            st.dataframe(customer_df[['name', 'phone', 'email', 'points', 'tier']])
-        
-        st.subheader("Add/Edit Customer")
-        with st.form("customer_form"):
-            name = st.text_input("Customer Name*")
-            phone = st.text_input("Phone Number")
-            email = st.text_input("Email")
-            points = st.number_input("Points*", min_value=0, value=0, step=1)
-            
-            tiers = loyalty.get('tiers', {})
-            if tiers:
-                current_tier = None
-                for tier_name, tier_data in tiers.items():
-                    if points >= tier_data['min_points']:
-                        current_tier = tier_name
-                
-                tier_options = list(tiers.keys())
-                tier = st.selectbox("Tier", tier_options, index=tier_options.index(current_tier) if current_tier else 0)
-            else:
-                tier = st.text_input("Tier (no tiers defined yet)")
-            
-            if st.form_submit_button("Save Customer"):
-                customer_id = str(uuid.uuid4())
-                customers[customer_id] = {
-                    'id': customer_id,
-                    'name': name,
-                    'phone': phone,
-                    'email': email,
-                    'points': points,
-                    'tier': tier,
-                    'last_updated': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                loyalty['customers'] = customers
-                save_data(loyalty, LOYALTY_FILE)
-                st.success("Customer saved successfully")
+        loyalty_customer_management()
+    
     
     with tab3:
-        st.header("Rewards Management")
-        
-        loyalty = load_data(LOYALTY_FILE)
-        rewards = loyalty.get('rewards', {})
-        
-        st.subheader("Current Rewards")
-        if not rewards:
-            st.info("No rewards defined")
-        else:
-            reward_df = pd.DataFrame.from_dict(rewards, orient='index')
-            st.dataframe(reward_df)
-        
-        st.subheader("Add/Edit Reward")
-        with st.form("reward_form"):
-            name = st.text_input("Reward Name*")
-            points_required = st.number_input("Points Required*", min_value=1, value=100, step=1)
-            description = st.text_area("Description")
-            active = st.checkbox("Active", value=True)
-            
-            submit_button = st.form_submit_button("Save Reward")
-            
-            if submit_button:
-                if not name:
-                    st.error("Reward name is required")
-                else:
-                    reward_id = str(uuid.uuid4())
-                    rewards[reward_id] = {
-                        'name': name,
-                        'points': points_required,
-                        'description': description,
-                        'active': active,
-                        'created_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    loyalty['rewards'] = rewards
-                    save_data(loyalty, LOYALTY_FILE)
-                    st.success("Reward saved successfully")
+        loyalty_settings_management()
+
+def loyalty_tier_management():
+    st.header("Loyalty Tiers Configuration")
     
-    with tab4:
-        st.header("Bulk Import Customers")
-        
-        st.info("Download the template file to prepare your customer data")
-        
-        # Generate template file
-        template_data = {
-            "name": ["John Doe", ""],
-            "phone": ["1234567890", ""],
-            "email": ["john@example.com", ""],
-            "points": [100, ""],
-            "tier": ["Silver", ""]
+    loyalty_data = load_data(LOYALTY_FILE)
+    
+    # Initialize tiers if they don't exist
+    if 'tiers' not in loyalty_data:
+        loyalty_data['tiers'] = {
+            'Bronze': {'min_points': 0, 'discount': 0.0, 'benefits': ['Basic rewards']},
+            'Silver': {'min_points': 1000, 'discount': 0.05, 'benefits': ['5% discount', 'Early access to sales']},
+            'Gold': {'min_points': 5000, 'discount': 0.10, 'benefits': ['10% discount', 'Free delivery', 'Birthday rewards']},
+            'Platinum': {'min_points': 10000, 'discount': 0.15, 'benefits': ['15% discount', 'Personal shopper', 'VIP events']}
         }
-        template_df = pd.DataFrame(template_data)
+        save_data(loyalty_data, LOYALTY_FILE)
+    
+    tiers = loyalty_data['tiers']
+    
+    # Display current tiers
+    st.subheader("Current Loyalty Tiers")
+    if not tiers:
+        st.info("No loyalty tiers configured")
+    else:
+        tier_data = []
+        for tier_name, tier_info in tiers.items():
+            # FIXED: Handle missing 'benefits' key with default value
+            benefits = tier_info.get('benefits', ['No benefits specified'])
+            tier_data.append({
+                'Tier': tier_name,
+                'Minimum Points': tier_info.get('min_points', 0),
+                'Discount': f"{tier_info.get('discount', 0) * 100}%",
+                'Benefits': ', '.join(benefits)  # This was causing the KeyError
+            })
         
-        st.download_button(
-            label="Download Template",
-            data=template_df.to_csv(index=False).encode('utf-8'),
-            file_name="loyalty_customer_import_template.csv",
-            mime="text/csv"
+        st.dataframe(pd.DataFrame(tier_data))
+    
+    # Add/Edit tier form
+    st.subheader("Add/Edit Tier")
+    with st.form("tier_form"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            tier_names = list(tiers.keys()) if tiers else []
+            edit_tier = st.selectbox("Select Tier to Edit", [""] + tier_names, key="edit_tier_select")
+            
+            if edit_tier:
+                tier_info = tiers[edit_tier]
+                new_tier_name = st.text_input("Tier Name", value=edit_tier, key="tier_name")
+                min_points = st.number_input("Minimum Points", min_value=0, value=tier_info.get('min_points', 0), key="min_points")
+                discount = st.number_input("Discount (%)", min_value=0.0, max_value=50.0, value=tier_info.get('discount', 0) * 100, step=0.5, key="discount")
+            else:
+                new_tier_name = st.text_input("Tier Name", key="new_tier_name")
+                min_points = st.number_input("Minimum Points", min_value=0, value=0, key="new_min_points")
+                discount = st.number_input("Discount (%)", min_value=0.0, max_value=50.0, value=0.0, step=0.5, key="new_discount")
+        
+        with col2:
+            if edit_tier:
+                # FIXED: Handle missing 'benefits' key
+                current_benefits = tier_info.get('benefits', [])
+                benefits = st.text_area("Benefits (one per line)", value="\n".join(current_benefits), key="benefits")
+            else:
+                benefits = st.text_area("Benefits (one per line)", value="", key="new_benefits")
+            
+            benefit_list = [b.strip() for b in benefits.split('\n') if b.strip()]
+        
+        if st.form_submit_button("💾 Save Tier Configuration"):
+            if not new_tier_name:
+                st.error("Tier name is required")
+            else:
+                # Remove old tier if name changed
+                if edit_tier and edit_tier != new_tier_name:
+                    if edit_tier in tiers:
+                        del tiers[edit_tier]
+                
+                # Add/update tier
+                tiers[new_tier_name] = {
+                    'min_points': min_points,
+                    'discount': discount / 100,
+                    'benefits': benefit_list
+                }
+                
+                loyalty_data['tiers'] = tiers
+                save_data(loyalty_data, LOYALTY_FILE)
+                st.success("Tier configuration saved successfully!")
+                st.rerun()
+    
+    # Delete tier option
+    if tiers:
+        st.subheader("Delete Tier")
+        delete_tier = st.selectbox("Select Tier to Delete", [""] + list(tiers.keys()), key="delete_tier_select")
+        
+        if delete_tier and st.button("🗑️ Delete Tier", type="secondary"):
+            # Check if any customers are using this tier
+            customers = loyalty_data.get('customers', {})
+            customers_in_tier = [c for c in customers.values() if c.get('tier') == delete_tier]
+            
+            if customers_in_tier:
+                st.error(f"Cannot delete {delete_tier} tier - {len(customers_in_tier)} customers are assigned to this tier")
+            else:
+                del tiers[delete_tier]
+                loyalty_data['tiers'] = tiers
+                save_data(loyalty_data, LOYALTY_FILE)
+                st.success(f"Tier {delete_tier} deleted successfully!")
+                st.rerun()
+
+def loyalty_customer_management():
+    st.header("Loyalty Customer Management")
+    
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    tiers = loyalty_data.get('tiers', {})
+    
+    # Search and filter
+    st.subheader("Search Customers")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        search_term = st.text_input("Search by name, phone, or ID", key="cust_search")
+    
+    with col2:
+        tier_filter = st.selectbox("Filter by Tier", ["All"] + list(tiers.keys()), key="tier_filter")
+    
+    # Apply filters
+    filtered_customers = {}
+    for cust_id, customer in customers.items():
+        matches_search = not search_term or (
+            search_term.lower() in customer.get('name', '').lower() or
+            search_term.lower() in customer.get('phone', '').lower() or
+            search_term.lower() in cust_id.lower()
         )
         
-        uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
+        matches_tier = tier_filter == "All" or customer.get('tier') == tier_filter
         
-        if uploaded_file:
-            try:
-                df = pd.read_csv(uploaded_file)
-                st.dataframe(df)
+        if matches_search and matches_tier:
+            filtered_customers[cust_id] = customer
+    
+    # Display customers
+    st.subheader(f"Customers ({len(filtered_customers)} found)")
+    if not filtered_customers:
+        st.info("No customers found matching your criteria")
+    else:
+        for cust_id, customer in filtered_customers.items():
+            with st.expander(f"{customer.get('name', 'Unknown')} - {cust_id}"):
+                col1, col2 = st.columns(2)
                 
-                if st.button("Import Customers"):
-                    loyalty = load_data(LOYALTY_FILE)
-                    customers = loyalty.get('customers', {})
-                    tiers = loyalty.get('tiers', {})
-                    imported = 0
-                    updated = 0
-                    errors = 0
+                with col1:
+                    st.write(f"**Phone:** {customer.get('phone', 'N/A')}")
+                    st.write(f"**Email:** {customer.get('email', 'N/A')}")
+                    st.write(f"**Tier:** {customer.get('tier', 'N/A')}")
+                    st.write(f"**Points:** {customer.get('points', 0)}")
+                
+                with col2:
+                    st.write(f"**Join Date:** {customer.get('date_joined', 'N/A')}")
+                    st.write(f"**Last Activity:** {customer.get('last_activity', 'N/A')}")
+                    st.write(f"**Total Spent:** {format_currency(customer.get('total_spent', 0))}")
                     
-                    for _, row in df.iterrows():
-                        try:
-                            if pd.isna(row['name']) or str(row['name']).strip() == "":
-                                errors += 1
-                                continue
-                            
-                            customer_id = str(uuid.uuid4())
-                            
-                            customer_data = {
-                                'id': customer_id,
-                                'name': str(row['name']).strip(),
-                                'phone': str(row['phone']).strip() if not pd.isna(row['phone']) else "",
-                                'email': str(row['email']).strip() if not pd.isna(row['email']) else "",
-                                'points': int(row['points']) if not pd.isna(row['points']) else 0,
-                                'tier': str(row['tier']).strip() if not pd.isna(row['tier']) else "",
-                                'last_updated': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
-                            }
-                            
-                            # Validate tier
-                            if customer_data['tier'] and customer_data['tier'] not in tiers:
-                                errors += 1
-                                continue
-                            
-                            customers[customer_id] = customer_data
-                            imported += 1
+                    # Quick actions
+                    if st.button("View Details", key=f"view_{cust_id}"):
+                        st.session_state.selected_customer = cust_id
+                
+                # Points adjustment
+                with st.form(key=f"points_form_{cust_id}"):
+                    points_action = st.radio("Points Action", ["Add Points", "Subtract Points", "Set Points"], 
+                                           key=f"points_action_{cust_id}")
+                    points_value = st.number_input("Points", min_value=0, value=0, key=f"points_value_{cust_id}")
+                    points_reason = st.text_input("Reason", key=f"points_reason_{cust_id}")
+                    
+                    if st.form_submit_button("Update Points"):
+                        if points_action == "Add Points":
+                            customers[cust_id]['points'] = customers[cust_id].get('points', 0) + points_value
+                        elif points_action == "Subtract Points":
+                            customers[cust_id]['points'] = max(0, customers[cust_id].get('points', 0) - points_value)
+                        else:  # Set Points
+                            customers[cust_id]['points'] = points_value
                         
-                        except Exception as e:
-                            errors += 1
-                            continue
+                        customers[cust_id]['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                        loyalty_data['customers'] = customers
+                        save_data(loyalty_data, LOYALTY_FILE)
+                        st.success("Points updated successfully!")
+                        st.rerun()
+    
+    # Add new customer
+    st.subheader("Add New Customer")
+    with st.form("new_customer_form"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            name = st.text_input("Full Name*")
+            phone = st.text_input("Phone Number*")
+            email = st.text_input("Email Address")
+        
+        with col2:
+            initial_points = st.number_input("Initial Points", min_value=0, value=0)
+            initial_tier = st.selectbox("Initial Tier", [""] + list(tiers.keys()))
+            address = st.text_area("Address")
+        
+        if st.form_submit_button("➕ Add Customer"):
+            if not name or not phone:
+                st.error("Name and phone number are required")
+            else:
+                # Check for duplicate phone
+                phone_exists = any(c.get('phone') == phone for c in customers.values())
+                if phone_exists:
+                    st.error("A customer with this phone number already exists")
+                else:
+                    # Create new customer
+                    cust_id = f"CUST{generate_short_id()}"
                     
-                    loyalty['customers'] = customers
-                    save_data(loyalty, LOYALTY_FILE)
-                    st.success(f"Import completed: {imported} new customers, {errors} errors")
-            except Exception as e:
-                st.error(f"Error reading CSV file: {str(e)}")
+                    # Determine tier based on points if not specified
+                    if not initial_tier:
+                        for tier_name, tier_info in tiers.items():
+                            if initial_points >= tier_info['min_points']:
+                                initial_tier = tier_name
+                    
+                    customers[cust_id] = {
+                        'id': cust_id,
+                        'name': name,
+                        'phone': phone,
+                        'email': email,
+                        'address': address,
+                        'points': initial_points,
+                        'tier': initial_tier or 'Bronze',
+                        'total_spent': 0,
+                        'visit_count': 0,
+                        'date_joined': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                        'last_activity': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                        'joined_by': st.session_state.user_info['username']
+                    }
+                    
+                    loyalty_data['customers'] = customers
+                    save_data(loyalty_data, LOYALTY_FILE)
+                    st.success(f"Customer added successfully! Customer ID: {cust_id}")
+                    st.rerun()
+
+def loyalty_rewards_management():
+    st.header("Rewards Management")
+    
+    loyalty_data = load_data(LOYALTY_FILE)
+    rewards = loyalty_data.get('rewards', {})
+    
+    # Initialize rewards if empty
+    if not rewards:
+        rewards = {
+            'REW001': {
+                'name': '10% Off Next Purchase',
+                'points': 500,
+                'description': 'Get 10% off your entire next purchase',
+                'active': True,
+                'max_redemptions': 1,
+                'valid_days': 30
+            },
+            'REW002': {
+                'name': 'Free Product',
+                'points': 1000,
+                'description': 'Choose any product under $20 for free',
+                'active': True,
+                'max_redemptions': None,
+                'valid_days': 60
+            }
+        }
+        loyalty_data['rewards'] = rewards
+        save_data(loyalty_data, LOYALTY_FILE)
+    
+    # Display current rewards
+    st.subheader("Current Rewards")
+    if not rewards:
+        st.info("No rewards configured")
+    else:
+        reward_data = []
+        for reward_id, reward in rewards.items():
+            if reward['active']:
+                status = "🟢 Active"
+            else:
+                status = "🔴 Inactive"
+            
+            reward_data.append({
+                'ID': reward_id,
+                'Name': reward['name'],
+                'Points': reward['points'],
+                'Description': reward['description'],
+                'Status': status
+            })
+        
+        st.dataframe(pd.DataFrame(reward_data))
+    
+    # Add/Edit reward form
+    st.subheader("Add/Edit Reward")
+    with st.form("reward_form"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            reward_options = [""] + list(rewards.keys())
+            edit_reward = st.selectbox("Select Reward to Edit", reward_options, key="edit_reward_select")
+            
+            if edit_reward:
+                reward = rewards[edit_reward]
+                name = st.text_input("Reward Name", value=reward['name'], key="reward_name")
+                points = st.number_input("Points Required", min_value=1, value=reward['points'], key="reward_points")
+                description = st.text_area("Description", value=reward['description'], key="reward_desc")
+            else:
+                name = st.text_input("Reward Name", key="new_reward_name")
+                points = st.number_input("Points Required", min_value=1, value=100, key="new_reward_points")
+                description = st.text_area("Description", key="new_reward_desc")
+        
+        with col2:
+            if edit_reward:
+                active = st.checkbox("Active", value=reward['active'], key="reward_active")
+                max_redemptions = st.number_input("Max Redemptions per Customer", min_value=1, 
+                                                value=reward.get('max_redemptions', 1), key="reward_max_redemptions")
+                valid_days = st.number_input("Valid for (days)", min_value=1, 
+                                           value=reward.get('valid_days', 30), key="reward_valid_days")
+            else:
+                active = st.checkbox("Active", value=True, key="new_reward_active")
+                max_redemptions = st.number_input("Max Redemptions per Customer", min_value=1, value=1, 
+                                                key="new_reward_max_redemptions")
+                valid_days = st.number_input("Valid for (days)", min_value=1, value=30, 
+                                           key="new_reward_valid_days")
+        
+        if st.form_submit_button("💾 Save Reward"):
+            if not name:
+                st.error("Reward name is required")
+            else:
+                reward_id = edit_reward if edit_reward else f"REW{generate_short_id()}"
+                
+                rewards[reward_id] = {
+                    'name': name,
+                    'points': points,
+                    'description': description,
+                    'active': active,
+                    'max_redemptions': max_redemptions if max_redemptions > 0 else None,
+                    'valid_days': valid_days,
+                    'created_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                    'created_by': st.session_state.user_info['username']
+                }
+                
+                loyalty_data['rewards'] = rewards
+                save_data(loyalty_data, LOYALTY_FILE)
+                st.success("Reward saved successfully!")
+                st.rerun()
+    
+    # Reward redemption history
+    st.subheader("Reward Redemption History")
+    customers = loyalty_data.get('customers', {})
+    
+    redemption_data = []
+    for cust_id, customer in customers.items():
+        redemptions = customer.get('redemptions', [])
+        for redemption in redemptions:
+            redemption_data.append({
+                'Customer': customer.get('name', 'Unknown'),
+                'Reward': redemption.get('reward_name', 'Unknown'),
+                'Points Used': redemption.get('points_used', 0),
+                'Date': redemption.get('date_redeemed', 'N/A')
+            })
+    
+    if redemption_data:
+        st.dataframe(pd.DataFrame(redemption_data))
+    else:
+        st.info("No reward redemptions yet")
+
+def loyalty_settings_management():
+    st.header("Loyalty Program Settings")
+    
+    loyalty_data = load_data(LOYALTY_FILE)
+    
+    # Initialize settings if they don't exist
+    if 'settings' not in loyalty_data:
+        loyalty_data['settings'] = {
+            'points_per_dollar': 1.0,  # Changed to float
+            'points_value': 0.01,
+            'signup_bonus': 100,
+            'min_redemption': 100,
+            'points_expiry_days': 365,
+            'auto_enroll': True,
+            'birthday_bonus': 500,
+            'anniversary_bonus': 250
+        }
+        save_data(loyalty_data, LOYALTY_FILE)
+    
+    settings = loyalty_data['settings']
+    
+    with st.form("loyalty_settings_form"):
+        st.subheader("Points Configuration")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            points_per_dollar = st.number_input(
+                "Points per Dollar Spent", 
+                min_value=0.1, 
+                max_value=10.0, 
+                value=float(settings.get('points_per_dollar', 1.0)),  # Ensure float
+                step=0.1
+            )
+            points_value = st.number_input(
+                "Point Value (in dollars)", 
+                min_value=0.001, 
+                max_value=1.0, 
+                value=float(settings.get('points_value', 0.01)),  # Ensure float
+                step=0.001,
+                help="How much each point is worth when redeemed"
+            )
+            signup_bonus = st.number_input(
+                "Sign-up Bonus Points", 
+                min_value=0, 
+                value=int(settings.get('signup_bonus', 100))  # Ensure integer
+            )
+        
+        with col2:
+            min_redemption = st.number_input(
+                "Minimum Redemption Points", 
+                min_value=1, 
+                value=int(settings.get('min_redemption', 100))  # Ensure integer
+            )
+            points_expiry = st.number_input(
+                "Points Expiry (days)", 
+                min_value=0, 
+                value=int(settings.get('points_expiry_days', 365)),  # Ensure integer
+                help="0 means points never expire"
+            )
+            auto_enroll = st.checkbox(
+                "Auto-enroll New Customers", 
+                value=settings.get('auto_enroll', True)
+            )
+        
+        st.subheader("Special Bonuses")
+        col1, col2 = st.columns(2)
+        with col1:
+            birthday_bonus = st.number_input(
+                "Birthday Bonus Points", 
+                min_value=0, 
+                value=int(settings.get('birthday_bonus', 500))  # Ensure integer
+            )
+        with col2:
+            anniversary_bonus = st.number_input(
+                "Anniversary Bonus Points", 
+                min_value=0, 
+                value=int(settings.get('anniversary_bonus', 250))  # Ensure integer
+            )
+        
+        if st.form_submit_button("💾 Save Settings"):
+            loyalty_data['settings'] = {
+                'points_per_dollar': float(points_per_dollar),  # Convert to float
+                'points_value': float(points_value),  # Convert to float
+                'signup_bonus': int(signup_bonus),  # Convert to int
+                'min_redemption': int(min_redemption),  # Convert to int
+                'points_expiry_days': int(points_expiry),  # Convert to int
+                'auto_enroll': auto_enroll,
+                'birthday_bonus': int(birthday_bonus),  # Convert to int
+                'anniversary_bonus': int(anniversary_bonus)  # Convert to int
+            }
+            
+            save_data(loyalty_data, LOYALTY_FILE)
+            st.success("Loyalty program settings saved successfully!")
+
+# LOYALTY FUNCTIONS FOR POS INTEGRATION
+def apply_loyalty_discount(customer_id, transaction_total):
+    """Apply loyalty discount based on customer's tier"""
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    tiers = loyalty_data.get('tiers', {})
+    
+    if customer_id not in customers:
+        return 0
+    
+    customer = customers[customer_id]
+    tier_name = customer.get('tier', 'Bronze')
+    
+    if tier_name in tiers:
+        discount_percent = tiers[tier_name].get('discount', 0)
+        return transaction_total * discount_percent
+    
+    return 0
+
+def calculate_loyalty_points(customer_id, transaction_total):
+    """Calculate loyalty points earned from a transaction"""
+    loyalty_data = load_data(LOYALTY_FILE)
+    settings = loyalty_data.get('settings', {})
+    
+    points_per_dollar = settings.get('points_per_dollar', 1)
+    return int(transaction_total * points_per_dollar)
+
+def redeem_loyalty_points(customer_id, points_to_redeem):
+    """Redeem loyalty points for a customer"""
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    
+    if customer_id not in customers:
+        return False, "Customer not found"
+    
+    customer = customers[customer_id]
+    current_points = customer.get('points', 0)
+    
+    if points_to_redeem > current_points:
+        return False, "Not enough points"
+    
+    # Calculate discount value
+    settings = loyalty_data.get('settings', {})
+    points_value = settings.get('points_value', 0.01)
+    discount_amount = points_to_redeem * points_value
+    
+    # Update customer points
+    customer['points'] = current_points - points_to_redeem
+    customer['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Add to redemption history
+    redemptions = customer.get('redemptions', [])
+    redemptions.append({
+        'points_used': points_to_redeem,
+        'discount_amount': discount_amount,
+        'date_redeemed': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        'redeemed_by': st.session_state.user_info['username']
+    })
+    customer['redemptions'] = redemptions
+    
+    loyalty_data['customers'] = customers
+    save_data(loyalty_data, LOYALTY_FILE)
+    
+    return True, discount_amount
+
+def update_customer_loyalty(customer_id, transaction_total, points_earned, points_redeemed, discount_amount):
+    """Update customer loyalty data after a transaction"""
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    tiers = loyalty_data.get('tiers', {})
+    
+    if customer_id not in customers:
+        return
+    
+    customer = customers[customer_id]
+    
+    # Update points
+    customer['points'] = customer.get('points', 0) + points_earned - points_redeemed
+    customer['total_spent'] = customer.get('total_spent', 0) + transaction_total
+    customer['visit_count'] = customer.get('visit_count', 0) + 1
+    customer['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Check for tier upgrade
+    current_points = customer['points']
+    current_tier = customer.get('tier', 'Bronze')
+    
+    # Find the highest tier the customer qualifies for
+    new_tier = current_tier
+    for tier_name, tier_info in tiers.items():
+        if current_points >= tier_info.get('min_points', 0):
+            # Check if this is a higher tier than current
+            tier_order = list(tiers.keys())
+            if tier_order.index(tier_name) > tier_order.index(current_tier):
+                new_tier = tier_name
+    
+    # Update tier if changed
+    if new_tier != current_tier:
+        customer['tier'] = new_tier
+        # Add tier change to history
+        tier_history = customer.get('tier_history', [])
+        tier_history.append({
+            'from_tier': current_tier,
+            'to_tier': new_tier,
+            'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+            'points_at_change': current_points
+        })
+        customer['tier_history'] = tier_history
+    
+    loyalty_data['customers'] = customers
+    save_data(loyalty_data, LOYALTY_FILE)
 
 # Categories Management
 def categories_management():
