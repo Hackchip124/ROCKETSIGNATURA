@@ -20,7 +20,7 @@ import threading
 import platform
 import pytz
 from datetime import timedelta
-
+import matplotlib.pyplot as plt
 # Constants
 DATA_DIR = "data"
 BACKUP_DIR = "backups"
@@ -9533,6 +9533,8 @@ def reports_analytics():
     returns_data = load_data(RETURNS_FILE)
     categories_data = load_data(CATEGORIES_FILE)
     brands_data = load_data(BRANDS_FILE)
+    discounts_data = load_data(DISCOUNTS_FILE)
+    offers_data = load_data(OFFERS_FILE)
     
     # Date range selector
     col1, col2, col3 = st.columns([2, 2, 1])
@@ -9564,17 +9566,30 @@ def reports_analytics():
         except (ValueError, KeyError):
             continue
     
-    # Calculate key metrics
-    total_sales = sum(t.get('total', 0) for t in filtered_transactions)
-    total_returns = sum(r.get('total_refund', 0) for r in filtered_returns)
-    net_sales = total_sales - total_returns
+    # Calculate key metrics with discount tracking
+    total_sales = 0
+    total_discounts = 0
+    total_returns = 0
     transaction_count = len(filtered_transactions)
+    
+    for t in filtered_transactions:
+        total_sales += t.get('total', 0)
+        # Sum all types of discounts
+        total_discounts += t.get('discount', 0)  # Regular discounts
+        total_discounts += t.get('loyalty_discount', 0)  # Loyalty discounts
+        total_discounts += t.get('points_discount', 0)  # Points discounts
+    
+    for r in filtered_returns:
+        total_returns += r.get('total_refund', 0)
+    
+    net_sales = total_sales - total_returns
     avg_transaction_value = total_sales / transaction_count if transaction_count > 0 else 0
     return_rate = (total_returns / total_sales * 100) if total_sales > 0 else 0
+    discount_rate = (total_discounts / total_sales * 100) if total_sales > 0 else 0
     
-    # KPI Cards
+    # KPI Cards with discount metrics
     st.subheader("📈 Key Performance Indicators")
-    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)  # Added extra column for discounts
     
     with kpi1:
         st.metric("Total Sales", format_currency(total_sales))
@@ -9587,27 +9602,31 @@ def reports_analytics():
         st.metric("Avg. Transaction", format_currency(avg_transaction_value))
     with kpi5:
         st.metric("Return Rate", f"{return_rate:.1f}%")
+    with kpi6:
+        st.metric("Discounts", format_currency(total_discounts), f"{discount_rate:.1f}%")
     
     # Main dashboard layout
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5,  = st.tabs([  # Added discount tab
         "📅 Sales Overview", 
         "📦 Product Performance", 
         "👥 Customer Insights", 
         "💳 Payment Analysis",
-        "📋 Export Reports"
+        "🎯 Discount Analysis",  # New tab for discounts
     ])
     
     with tab1:
         st.header("Sales Overview")
         
-        # Daily sales trend
+        # Daily sales trend with discount tracking
         daily_sales = {}
+        daily_discounts = {}
         daily_returns = {}
         daily_transactions = {}
         
         current_date = start_date
         while current_date <= end_date:
             daily_sales[current_date] = 0
+            daily_discounts[current_date] = 0
             daily_returns[current_date] = 0
             daily_transactions[current_date] = 0
             current_date += datetime.timedelta(days=1)
@@ -9616,6 +9635,9 @@ def reports_analytics():
             try:
                 trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
                 daily_sales[trans_date] += t.get('total', 0)
+                # Sum all discount types
+                daily_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+                daily_discounts[trans_date] += daily_discount
                 daily_transactions[trans_date] += 1
             except:
                 continue
@@ -9631,6 +9653,7 @@ def reports_analytics():
         chart_data = pd.DataFrame({
             'Date': [d.strftime('%Y-%m-%d') for d in daily_sales.keys()],
             'Sales': list(daily_sales.values()),
+            'Discounts': list(daily_discounts.values()),
             'Returns': list(daily_returns.values()),
             'Transactions': list(daily_transactions.values()),
             'Net Sales': [sales - returns for sales, returns in zip(daily_sales.values(), daily_returns.values())]
@@ -9642,8 +9665,12 @@ def reports_analytics():
             st.line_chart(chart_data.set_index('Date')[['Sales', 'Returns', 'Net Sales']])
         
         with col2:
-            st.subheader("Transaction Volume")
-            st.bar_chart(chart_data.set_index('Date')['Transactions'])
+            st.subheader("Discounts & Transactions")
+            col2a, col2b = st.columns(2)
+            with col2a:
+                st.bar_chart(chart_data.set_index('Date')['Discounts'])
+            with col2b:
+                st.bar_chart(chart_data.set_index('Date')['Transactions'])
             
             # Quick stats
             st.info(f"""
@@ -9651,20 +9678,30 @@ def reports_analytics():
             - Total Days: {len(daily_sales)}
             - Best Day: {format_currency(max(daily_sales.values()))}
             - Average Daily: {format_currency(sum(daily_sales.values()) / len(daily_sales))}
+            - Total Discounts: {format_currency(sum(daily_discounts.values()))}
             """)
     
     with tab2:
         st.header("Product Performance")
         
-        # Product sales analysis
+        # Product sales analysis with discount tracking
         product_sales = {}
+        product_discounts = {}
         category_sales = {}
+        category_discounts = {}
         
         for t in filtered_transactions:
+            transaction_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+            
             for barcode, item in t.get('items', {}).items():
                 product = products.get(barcode, {'name': 'Unknown', 'category': 'Uncategorized', 'brand': 'No Brand'})
                 category = product.get('category', 'Uncategorized')
                 brand = product.get('brand', 'No Brand')
+                
+                # Calculate discount allocation per item (proportional to item value)
+                item_value = item.get('price', 0) * item.get('quantity', 0)
+                transaction_total = t.get('subtotal', 0)
+                item_discount_share = (item_value / transaction_total) * transaction_discount if transaction_total > 0 else 0
                 
                 # Product level
                 if barcode not in product_sales:
@@ -9673,16 +9710,19 @@ def reports_analytics():
                         'category': category,
                         'brand': brand,
                         'quantity': 0,
-                        'revenue': 0
+                        'revenue': 0,
+                        'discounts': 0
                     }
                 product_sales[barcode]['quantity'] += item.get('quantity', 0)
-                product_sales[barcode]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
+                product_sales[barcode]['revenue'] += item_value
+                product_sales[barcode]['discounts'] += item_discount_share
                 
                 # Category level
                 if category not in category_sales:
-                    category_sales[category] = {'quantity': 0, 'revenue': 0}
+                    category_sales[category] = {'quantity': 0, 'revenue': 0, 'discounts': 0}
                 category_sales[category]['quantity'] += item.get('quantity', 0)
-                category_sales[category]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
+                category_sales[category]['revenue'] += item_value
+                category_sales[category]['discounts'] += item_discount_share
         
         if product_sales:
             # Convert to DataFrames
@@ -9693,10 +9733,16 @@ def reports_analytics():
             
             with col1:
                 st.subheader("Top 10 Products by Revenue")
-                top_products = product_df.nlargest(10, 'revenue')[['name', 'quantity', 'revenue']]
+                top_products = product_df.nlargest(10, 'revenue')[['name', 'quantity', 'revenue', 'discounts']]
+                top_products['net_revenue'] = top_products['revenue'] - top_products['discounts']
+                top_products['discount_rate'] = (top_products['discounts'] / top_products['revenue'] * 100).round(1)
+                
                 st.dataframe(
                     top_products.style.format({
-                        'revenue': lambda x: f"${x:,.2f}",
+                        'revenue': lambda x: format_currency(x),
+                        'discounts': lambda x: format_currency(x),
+                        'net_revenue': lambda x: format_currency(x),
+                        'discount_rate': lambda x: f"{x}%",
                         'quantity': lambda x: f"{x:,.0f}"
                     }),
                     height=400
@@ -9706,17 +9752,147 @@ def reports_analytics():
                 st.subheader("Sales by Category")
                 # Create horizontal bar chart for categories
                 category_chart_data = category_df.sort_values('revenue', ascending=True).tail(10)
-                st.bar_chart(category_chart_data['revenue'])
                 
-                st.subheader("Top Categories")
+                fig, ax = plt.subplots(figsize=(10, 6))
+                y_pos = np.arange(len(category_chart_data))
+                
+                ax.barh(y_pos, category_chart_data['revenue'], label='Revenue', color='lightblue')
+                ax.barh(y_pos, category_chart_data['discounts'], label='Discounts', color='lightcoral', 
+                       left=category_chart_data['revenue'] - category_chart_data['discounts'])
+                
+                ax.set_yticks(y_pos)
+                ax.set_yticklabels(category_chart_data.index)
+                ax.set_xlabel('Amount')
+                ax.legend()
+                ax.set_title('Revenue vs Discounts by Category')
+                
+                st.pyplot(fig)
+                
+                st.subheader("Top Categories with Discounts")
+                top_categories = category_df.nlargest(5, 'revenue').copy()
+                top_categories['net_revenue'] = top_categories['revenue'] - top_categories['discounts']
+                top_categories['discount_rate'] = (top_categories['discounts'] / top_categories['revenue'] * 100).round(1)
+                
                 st.dataframe(
-                    category_df.nlargest(5, 'revenue').style.format({
-                        'revenue': lambda x: f"${x:,.2f}",
+                    top_categories.style.format({
+                        'revenue': lambda x: format_currency(x),
+                        'discounts': lambda x: format_currency(x),
+                        'net_revenue': lambda x: format_currency(x),
+                        'discount_rate': lambda x: f"{x}%",
                         'quantity': lambda x: f"{x:,.0f}"
                     })
                 )
         else:
             st.info("No product sales data for the selected period")
+    
+    with tab5:  # New Discount Analysis tab
+        st.header("Discount Analysis")
+        
+        # Analyze discounts by type
+        discount_types = {
+            'regular': 0,
+            'loyalty': 0,
+            'points': 0
+        }
+        
+        discount_by_hour = {}
+        discount_by_cashier = {}
+        
+        for t in filtered_transactions:
+            # Categorize discounts
+            discount_types['regular'] += t.get('discount', 0)
+            discount_types['loyalty'] += t.get('loyalty_discount', 0)
+            discount_types['points'] += t.get('points_discount', 0)
+            
+            # Discounts by hour
+            try:
+                hour = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").hour
+                total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+                
+                if hour not in discount_by_hour:
+                    discount_by_hour[hour] = 0
+                discount_by_hour[hour] += total_discount
+            except:
+                pass
+            
+            # Discounts by cashier
+            cashier = t.get('cashier', 'Unknown')
+            total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+            
+            if cashier not in discount_by_cashier:
+                discount_by_cashier[cashier] = 0
+            discount_by_cashier[cashier] += total_discount
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Discounts by Type")
+            if sum(discount_types.values()) > 0:
+                fig1, ax1 = plt.subplots(figsize=(8, 8))
+                labels = ['Regular Discounts', 'Loyalty Discounts', 'Points Discounts']
+                sizes = [discount_types['regular'], discount_types['loyalty'], discount_types['points']]
+                colors = ['#ff9999', '#66b3ff', '#99ff99']
+                
+                ax1.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+                ax1.axis('equal')
+                st.pyplot(fig1)
+            else:
+                st.info("No discounts applied in this period")
+        
+        with col2:
+            st.subheader("Discounts by Hour")
+            if discount_by_hour:
+                hours = sorted(discount_by_hour.keys())
+                discount_values = [discount_by_hour[h] for h in hours]
+                
+                fig2, ax2 = plt.subplots(figsize=(10, 6))
+                ax2.bar(hours, discount_values, color='skyblue')
+                ax2.set_xlabel('Hour of Day')
+                ax2.set_ylabel('Total Discounts')
+                ax2.set_title('Discounts by Hour')
+                ax2.set_xticks(range(0, 24, 2))
+                st.pyplot(fig2)
+            else:
+                st.info("No discount timing data available")
+        
+        # Discounts by cashier
+        st.subheader("Discounts by Cashier")
+        if discount_by_cashier:
+            cashier_df = pd.DataFrame.from_dict(discount_by_cashier, orient='index', columns=['Total Discounts'])
+            cashier_df = cashier_df.sort_values('Total Discounts', ascending=False)
+            
+            st.dataframe(
+                cashier_df.style.format({
+                    'Total Discounts': lambda x: format_currency(x)
+                })
+            )
+        else:
+            st.info("No cashier discount data available")
+        
+        # Active discounts and offers
+        st.subheader("Active Discounts & Offers")
+        
+        # Get active discounts
+        active_discounts = [d for d in discounts_data.values() if d.get('active', False)]
+        active_offers = [o for o in offers_data.values() if o.get('active', False)]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Active Discounts**")
+            if active_discounts:
+                for discount in active_discounts:
+                    st.write(f"• {discount.get('name', 'Unknown')}: {discount.get('value', 0)}%")
+            else:
+                st.info("No active discounts")
+        
+        with col2:
+            st.write("**Active Offers**")
+            if active_offers:
+                for offer in active_offers:
+                    st.write(f"• {offer.get('name', 'Unknown')}: {offer.get('type', '').replace('_', ' ').title()}")
+            else:
+                st.info("No active offers")
     
     with tab3:
         st.header("Customer Insights")
