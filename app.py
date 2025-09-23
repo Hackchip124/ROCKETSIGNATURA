@@ -6567,6 +6567,7 @@ def product_management():
                                 save_data(inventory, INVENTORY_FILE)
                                 st.success("Product updated successfully")
                                 
+                                
     with tab3:
         st.header("Delete Product")
         
@@ -9546,6 +9547,8 @@ def reports_analytics():
     returns_data = load_data(RETURNS_FILE)
     categories_data = load_data(CATEGORIES_FILE)
     brands_data = load_data(BRANDS_FILE)
+    discounts_data = load_data(DISCOUNTS_FILE)
+    offers_data = load_data(OFFERS_FILE)
     
     # Date range selector
     col1, col2, col3 = st.columns([2, 2, 1])
@@ -9577,17 +9580,30 @@ def reports_analytics():
         except (ValueError, KeyError):
             continue
     
-    # Calculate key metrics
-    total_sales = sum(t.get('total', 0) for t in filtered_transactions)
-    total_returns = sum(r.get('total_refund', 0) for r in filtered_returns)
-    net_sales = total_sales - total_returns
+    # Calculate key metrics with discount tracking
+    total_sales = 0
+    total_discounts = 0
+    total_returns = 0
     transaction_count = len(filtered_transactions)
+    
+    for t in filtered_transactions:
+        total_sales += t.get('total', 0)
+        # Sum all types of discounts
+        total_discounts += t.get('discount', 0)  # Regular discounts
+        total_discounts += t.get('loyalty_discount', 0)  # Loyalty discounts
+        total_discounts += t.get('points_discount', 0)  # Points discounts
+    
+    for r in filtered_returns:
+        total_returns += r.get('total_refund', 0)
+    
+    net_sales = total_sales - total_returns
     avg_transaction_value = total_sales / transaction_count if transaction_count > 0 else 0
     return_rate = (total_returns / total_sales * 100) if total_sales > 0 else 0
+    discount_rate = (total_discounts / total_sales * 100) if total_sales > 0 else 0
     
-    # KPI Cards
+    # KPI Cards with discount metrics
     st.subheader("📈 Key Performance Indicators")
-    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
     
     with kpi1:
         st.metric("Total Sales", format_currency(total_sales))
@@ -9600,27 +9616,32 @@ def reports_analytics():
         st.metric("Avg. Transaction", format_currency(avg_transaction_value))
     with kpi5:
         st.metric("Return Rate", f"{return_rate:.1f}%")
+    with kpi6:
+        st.metric("Discounts", format_currency(total_discounts), f"{discount_rate:.1f}%")
     
     # Main dashboard layout
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📅 Sales Overview", 
         "📦 Product Performance", 
         "👥 Customer Insights", 
         "💳 Payment Analysis",
+        "🎯 Discount Analysis",
         "📋 Export Reports"
     ])
     
     with tab1:
         st.header("Sales Overview")
         
-        # Daily sales trend
+        # Daily sales trend with discount tracking
         daily_sales = {}
+        daily_discounts = {}
         daily_returns = {}
         daily_transactions = {}
         
         current_date = start_date
         while current_date <= end_date:
             daily_sales[current_date] = 0
+            daily_discounts[current_date] = 0
             daily_returns[current_date] = 0
             daily_transactions[current_date] = 0
             current_date += datetime.timedelta(days=1)
@@ -9629,6 +9650,9 @@ def reports_analytics():
             try:
                 trans_date = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").date()
                 daily_sales[trans_date] += t.get('total', 0)
+                # Sum all discount types
+                daily_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+                daily_discounts[trans_date] += daily_discount
                 daily_transactions[trans_date] += 1
             except:
                 continue
@@ -9644,6 +9668,7 @@ def reports_analytics():
         chart_data = pd.DataFrame({
             'Date': [d.strftime('%Y-%m-%d') for d in daily_sales.keys()],
             'Sales': list(daily_sales.values()),
+            'Discounts': list(daily_discounts.values()),
             'Returns': list(daily_returns.values()),
             'Transactions': list(daily_transactions.values()),
             'Net Sales': [sales - returns for sales, returns in zip(daily_sales.values(), daily_returns.values())]
@@ -9655,8 +9680,8 @@ def reports_analytics():
             st.line_chart(chart_data.set_index('Date')[['Sales', 'Returns', 'Net Sales']])
         
         with col2:
-            st.subheader("Transaction Volume")
-            st.bar_chart(chart_data.set_index('Date')['Transactions'])
+            st.subheader("Discounts & Transactions")
+            st.bar_chart(chart_data.set_index('Date')[['Discounts', 'Transactions']])
             
             # Quick stats
             st.info(f"""
@@ -9664,20 +9689,30 @@ def reports_analytics():
             - Total Days: {len(daily_sales)}
             - Best Day: {format_currency(max(daily_sales.values()))}
             - Average Daily: {format_currency(sum(daily_sales.values()) / len(daily_sales))}
+            - Total Discounts: {format_currency(sum(daily_discounts.values()))}
             """)
     
     with tab2:
         st.header("Product Performance")
         
-        # Product sales analysis
+        # Product sales analysis with discount tracking
         product_sales = {}
+        product_discounts = {}
         category_sales = {}
+        category_discounts = {}
         
         for t in filtered_transactions:
+            transaction_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+            
             for barcode, item in t.get('items', {}).items():
                 product = products.get(barcode, {'name': 'Unknown', 'category': 'Uncategorized', 'brand': 'No Brand'})
                 category = product.get('category', 'Uncategorized')
                 brand = product.get('brand', 'No Brand')
+                
+                # Calculate discount allocation per item (proportional to item value)
+                item_value = item.get('price', 0) * item.get('quantity', 0)
+                transaction_total = t.get('subtotal', 0)
+                item_discount_share = (item_value / transaction_total) * transaction_discount if transaction_total > 0 else 0
                 
                 # Product level
                 if barcode not in product_sales:
@@ -9686,16 +9721,19 @@ def reports_analytics():
                         'category': category,
                         'brand': brand,
                         'quantity': 0,
-                        'revenue': 0
+                        'revenue': 0,
+                        'discounts': 0
                     }
                 product_sales[barcode]['quantity'] += item.get('quantity', 0)
-                product_sales[barcode]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
+                product_sales[barcode]['revenue'] += item_value
+                product_sales[barcode]['discounts'] += item_discount_share
                 
                 # Category level
                 if category not in category_sales:
-                    category_sales[category] = {'quantity': 0, 'revenue': 0}
+                    category_sales[category] = {'quantity': 0, 'revenue': 0, 'discounts': 0}
                 category_sales[category]['quantity'] += item.get('quantity', 0)
-                category_sales[category]['revenue'] += item.get('price', 0) * item.get('quantity', 0)
+                category_sales[category]['revenue'] += item_value
+                category_sales[category]['discounts'] += item_discount_share
         
         if product_sales:
             # Convert to DataFrames
@@ -9706,10 +9744,16 @@ def reports_analytics():
             
             with col1:
                 st.subheader("Top 10 Products by Revenue")
-                top_products = product_df.nlargest(10, 'revenue')[['name', 'quantity', 'revenue']]
+                top_products = product_df.nlargest(10, 'revenue')[['name', 'quantity', 'revenue', 'discounts']]
+                top_products['net_revenue'] = top_products['revenue'] - top_products['discounts']
+                top_products['discount_rate'] = (top_products['discounts'] / top_products['revenue'] * 100).round(1)
+                
                 st.dataframe(
                     top_products.style.format({
-                        'revenue': lambda x: f"${x:,.2f}",
+                        'revenue': lambda x: format_currency(x),
+                        'discounts': lambda x: format_currency(x),
+                        'net_revenue': lambda x: format_currency(x),
+                        'discount_rate': lambda x: f"{x}%",
                         'quantity': lambda x: f"{x:,.0f}"
                     }),
                     height=400
@@ -9717,14 +9761,21 @@ def reports_analytics():
             
             with col2:
                 st.subheader("Sales by Category")
-                # Create horizontal bar chart for categories
-                category_chart_data = category_df.sort_values('revenue', ascending=True).tail(10)
+                # Create bar chart for categories
+                category_chart_data = category_df.sort_values('revenue', ascending=False).head(10)
                 st.bar_chart(category_chart_data['revenue'])
                 
-                st.subheader("Top Categories")
+                st.subheader("Top Categories with Discounts")
+                top_categories = category_df.nlargest(5, 'revenue').copy()
+                top_categories['net_revenue'] = top_categories['revenue'] - top_categories['discounts']
+                top_categories['discount_rate'] = (top_categories['discounts'] / top_categories['revenue'] * 100).round(1)
+                
                 st.dataframe(
-                    category_df.nlargest(5, 'revenue').style.format({
-                        'revenue': lambda x: f"${x:,.2f}",
+                    top_categories.style.format({
+                        'revenue': lambda x: format_currency(x),
+                        'discounts': lambda x: format_currency(x),
+                        'net_revenue': lambda x: format_currency(x),
+                        'discount_rate': lambda x: f"{x}%",
                         'quantity': lambda x: f"{x:,.0f}"
                     })
                 )
@@ -9734,23 +9785,29 @@ def reports_analytics():
     with tab3:
         st.header("Customer Insights")
         
-        # Customer analysis
         customer_spending = {}
+        customer_discounts = {}
+        
         for t in filtered_transactions:
             customer_id = t.get('customer_id')
             if customer_id:
+                total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+                
                 if customer_id not in customer_spending:
                     customer_spending[customer_id] = {
                         'transactions': 0,
                         'total_spent': 0,
+                        'discounts_received': 0,
                         'last_purchase': t.get('date', '')
                     }
                 customer_spending[customer_id]['transactions'] += 1
                 customer_spending[customer_id]['total_spent'] += t.get('total', 0)
+                customer_spending[customer_id]['discounts_received'] += total_discount
         
         if customer_spending:
             customer_df = pd.DataFrame.from_dict(customer_spending, orient='index')
             customer_df['avg_spend'] = customer_df['total_spent'] / customer_df['transactions']
+            customer_df['discount_rate'] = (customer_df['discounts_received'] / customer_df['total_spent'] * 100).round(1)
             
             col1, col2 = st.columns(2)
             
@@ -9759,42 +9816,49 @@ def reports_analytics():
                 top_customers = customer_df.nlargest(5, 'total_spent')
                 st.dataframe(
                     top_customers.style.format({
-                        'total_spent': lambda x: f"${x:,.2f}",
-                        'avg_spend': lambda x: f"${x:,.2f}",
+                        'total_spent': lambda x: format_currency(x),
+                        'discounts_received': lambda x: format_currency(x),
+                        'avg_spend': lambda x: format_currency(x),
+                        'discount_rate': lambda x: f"{x}%",
                         'transactions': lambda x: f"{x:,.0f}"
                     })
                 )
             
             with col2:
-                st.subheader("Customer Spending Distribution")
-                # Group customers by spending tiers
-                spending_tiers = {
-                    'VIP (>$500)': len(customer_df[customer_df['total_spent'] > 500]),
-                    'Regular ($100-$500)': len(customer_df[(customer_df['total_spent'] >= 100) & (customer_df['total_spent'] <= 500)]),
-                    'Occasional (<$100)': len(customer_df[customer_df['total_spent'] < 100])
+                st.subheader("Customer Discount Analysis")
+                # Group customers by discount rate
+                discount_groups = {
+                    'High (>10%)': len(customer_df[customer_df['discount_rate'] > 10]),
+                    'Medium (5-10%)': len(customer_df[(customer_df['discount_rate'] >= 5) & (customer_df['discount_rate'] <= 10)]),
+                    'Low (<5%)': len(customer_df[customer_df['discount_rate'] < 5])
                 }
-                st.bar_chart(spending_tiers)
+                st.bar_chart(discount_groups)
                 
                 st.metric("Total Customers", len(customer_df))
-                st.metric("Avg. Customer Value", format_currency(customer_df['total_spent'].mean()))
+                st.metric("Avg. Discount Rate", f"{customer_df['discount_rate'].mean():.1f}%")
         else:
             st.info("No customer data available for the selected period")
     
     with tab4:
         st.header("Payment Analysis")
         
-        # Payment method analysis
         payment_methods = {}
+        payment_discounts = {}
+        
         for t in filtered_transactions:
             method = t.get('payment_method', 'Unknown')
+            total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+            
             if method not in payment_methods:
-                payment_methods[method] = {'count': 0, 'amount': 0}
+                payment_methods[method] = {'count': 0, 'amount': 0, 'discounts': 0}
             payment_methods[method]['count'] += 1
             payment_methods[method]['amount'] += t.get('total', 0)
+            payment_methods[method]['discounts'] += total_discount
         
         if payment_methods:
             payment_df = pd.DataFrame.from_dict(payment_methods, orient='index')
             payment_df['avg_amount'] = payment_df['amount'] / payment_df['count']
+            payment_df['discount_rate'] = (payment_df['discounts'] / payment_df['amount'] * 100).round(1)
             
             col1, col2 = st.columns(2)
             
@@ -9802,8 +9866,10 @@ def reports_analytics():
                 st.subheader("Payment Methods Summary")
                 st.dataframe(
                     payment_df.style.format({
-                        'amount': lambda x: f"${x:,.2f}",
-                        'avg_amount': lambda x: f"${x:,.2f}",
+                        'amount': lambda x: format_currency(x),
+                        'discounts': lambda x: format_currency(x),
+                        'avg_amount': lambda x: format_currency(x),
+                        'discount_rate': lambda x: f"{x}%",
                         'count': lambda x: f"{x:,.0f}"
                     })
                 )
@@ -9812,12 +9878,113 @@ def reports_analytics():
                 st.subheader("Payment Method Popularity")
                 st.bar_chart(payment_df['count'])
                 
-                st.subheader("Revenue by Payment Method")
-                st.bar_chart(payment_df['amount'])
+                st.subheader("Discounts by Payment Method")
+                st.bar_chart(payment_df['discounts'])
         else:
             st.info("No payment data available")
     
     with tab5:
+        st.header("Discount Analysis")
+        
+        # Analyze discounts by type
+        discount_types = {
+            'regular': 0,
+            'loyalty': 0,
+            'points': 0
+        }
+        
+        discount_by_hour = {}
+        discount_by_cashier = {}
+        
+        for t in filtered_transactions:
+            # Categorize discounts
+            discount_types['regular'] += t.get('discount', 0)
+            discount_types['loyalty'] += t.get('loyalty_discount', 0)
+            discount_types['points'] += t.get('points_discount', 0)
+            
+            # Discounts by hour
+            try:
+                hour = datetime.datetime.strptime(t.get('date', ''), "%Y-%m-%d %H:%M:%S").hour
+                total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+                
+                if hour not in discount_by_hour:
+                    discount_by_hour[hour] = 0
+                discount_by_hour[hour] += total_discount
+            except:
+                pass
+            
+            # Discounts by cashier
+            cashier = t.get('cashier', 'Unknown')
+            total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+            
+            if cashier not in discount_by_cashier:
+                discount_by_cashier[cashier] = 0
+            discount_by_cashier[cashier] += total_discount
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Discounts by Type")
+            if sum(discount_types.values()) > 0:
+                discount_type_df = pd.DataFrame({
+                    'Type': ['Regular Discounts', 'Loyalty Discounts', 'Points Discounts'],
+                    'Amount': [discount_types['regular'], discount_types['loyalty'], discount_types['points']]
+                })
+                st.bar_chart(discount_type_df.set_index('Type'))
+            else:
+                st.info("No discounts applied in this period")
+        
+        with col2:
+            st.subheader("Discounts by Hour")
+            if discount_by_hour:
+                hours_df = pd.DataFrame({
+                    'Hour': list(discount_by_hour.keys()),
+                    'Discounts': list(discount_by_hour.values())
+                }).sort_values('Hour')
+                st.bar_chart(hours_df.set_index('Hour'))
+            else:
+                st.info("No discount timing data available")
+        
+        # Discounts by cashier
+        st.subheader("Discounts by Cashier")
+        if discount_by_cashier:
+            cashier_df = pd.DataFrame.from_dict(discount_by_cashier, orient='index', columns=['Total Discounts'])
+            cashier_df = cashier_df.sort_values('Total Discounts', ascending=False)
+            
+            st.dataframe(
+                cashier_df.style.format({
+                    'Total Discounts': lambda x: format_currency(x)
+                })
+            )
+        else:
+            st.info("No cashier discount data available")
+        
+        # Active discounts and offers
+        st.subheader("Active Discounts & Offers")
+        
+        # Get active discounts
+        active_discounts = [d for d in discounts_data.values() if d.get('active', False)]
+        active_offers = [o for o in offers_data.values() if o.get('active', False)]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Active Discounts**")
+            if active_discounts:
+                for discount in active_discounts:
+                    st.write(f"• {discount.get('name', 'Unknown')}: {discount.get('value', 0)}%")
+            else:
+                st.info("No active discounts")
+        
+        with col2:
+            st.write("**Active Offers**")
+            if active_offers:
+                for offer in active_offers:
+                    st.write(f"• {offer.get('name', 'Unknown')}: {offer.get('type', '').replace('_', ' ').title()}")
+            else:
+                st.info("No active offers")
+    
+    with tab6:
         st.header("Export Reports")
         
         st.subheader("Generate Custom Reports")
@@ -9827,6 +9994,7 @@ def reports_analytics():
             "Product Performance Report",
             "Customer Analysis Report",
             "Payment Method Report",
+            "Discount Analysis Report",
             "Daily Sales Summary"
         ])
         
@@ -9834,14 +10002,22 @@ def reports_analytics():
         if report_type == "Sales Detailed Report":
             selected_columns = st.multiselect(
                 "Select Columns",
-                options=['Date', 'Transaction ID', 'Cashier', 'Payment Method', 'Subtotal', 'Tax', 'Discount', 'Total', 'Items Count'],
-                default=['Date', 'Transaction ID', 'Cashier', 'Total']
+                options=['Date', 'Transaction ID', 'Cashier', 'Payment Method', 'Subtotal', 'Tax', 
+                        'Discount', 'Loyalty Discount', 'Points Discount', 'Total Discount', 'Total', 'Items Count'],
+                default=['Date', 'Transaction ID', 'Cashier', 'Total', 'Total Discount']
+            )
+        elif report_type == "Discount Analysis Report":
+            selected_columns = st.multiselect(
+                "Select Columns",
+                options=['Date', 'Transaction ID', 'Cashier', 'Payment Method', 'Regular Discount', 
+                        'Loyalty Discount', 'Points Discount', 'Total Discount', 'Subtotal', 'Discount Rate'],
+                default=['Date', 'Transaction ID', 'Cashier', 'Total Discount', 'Discount Rate']
             )
         elif report_type == "Product Performance Report":
             selected_columns = st.multiselect(
                 "Select Columns",
-                options=['Product Name', 'Category', 'Brand', 'Quantity Sold', 'Revenue', 'Avg Price'],
-                default=['Product Name', 'Quantity Sold', 'Revenue']
+                options=['Product Name', 'Category', 'Brand', 'Quantity Sold', 'Revenue', 'Discounts', 'Net Revenue', 'Avg Price', 'Discount Rate'],
+                default=['Product Name', 'Quantity Sold', 'Revenue', 'Discounts', 'Net Revenue']
             )
         
         # Format options
@@ -9853,6 +10029,9 @@ def reports_analytics():
                     if report_type == "Sales Detailed Report":
                         report_data = []
                         for t in filtered_transactions:
+                            total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+                            discount_rate = (total_discount / t.get('subtotal', 1) * 100) if t.get('subtotal', 0) > 0 else 0
+                            
                             report_data.append({
                                 'Date': t.get('date', ''),
                                 'Transaction ID': t.get('transaction_id', ''),
@@ -9861,21 +10040,49 @@ def reports_analytics():
                                 'Subtotal': t.get('subtotal', 0),
                                 'Tax': t.get('tax', 0),
                                 'Discount': t.get('discount', 0),
+                                'Loyalty Discount': t.get('loyalty_discount', 0),
+                                'Points Discount': t.get('points_discount', 0),
+                                'Total Discount': total_discount,
+                                'Discount Rate': f"{discount_rate:.1f}%",
                                 'Total': t.get('total', 0),
                                 'Items Count': len(t.get('items', {}))
+                            })
+                        df = pd.DataFrame(report_data)
+                    
+                    elif report_type == "Discount Analysis Report":
+                        report_data = []
+                        for t in filtered_transactions:
+                            total_discount = t.get('discount', 0) + t.get('loyalty_discount', 0) + t.get('points_discount', 0)
+                            discount_rate = (total_discount / t.get('subtotal', 1) * 100) if t.get('subtotal', 0) > 0 else 0
+                            
+                            report_data.append({
+                                'Date': t.get('date', ''),
+                                'Transaction ID': t.get('transaction_id', ''),
+                                'Cashier': t.get('cashier', ''),
+                                'Payment Method': t.get('payment_method', ''),
+                                'Regular Discount': t.get('discount', 0),
+                                'Loyalty Discount': t.get('loyalty_discount', 0),
+                                'Points Discount': t.get('points_discount', 0),
+                                'Total Discount': total_discount,
+                                'Subtotal': t.get('subtotal', 0),
+                                'Discount Rate': f"{discount_rate:.1f}%"
                             })
                         df = pd.DataFrame(report_data)
                     
                     elif report_type == "Product Performance Report":
                         report_data = []
                         for barcode, data in product_sales.items():
+                            discount_rate = (data['discounts'] / data['revenue'] * 100) if data['revenue'] > 0 else 0
                             report_data.append({
                                 'Product Name': data['name'],
                                 'Category': data['category'],
                                 'Brand': data['brand'],
                                 'Quantity Sold': data['quantity'],
                                 'Revenue': data['revenue'],
-                                'Avg Price': data['revenue'] / data['quantity'] if data['quantity'] > 0 else 0
+                                'Discounts': data['discounts'],
+                                'Net Revenue': data['revenue'] - data['discounts'],
+                                'Avg Price': data['revenue'] / data['quantity'] if data['quantity'] > 0 else 0,
+                                'Discount Rate': f"{discount_rate:.1f}%"
                             })
                         df = pd.DataFrame(report_data)
                     
@@ -9946,6 +10153,44 @@ def reports_analytics():
                 except Exception as e:
                     st.error(f"Error generating report: {str(e)}")
     
+    
+    # Quick insights at the bottom with discount focus
+    st.markdown("---")
+    st.subheader("📋 Quick Insights Summary")
+    
+    insight1, insight2, insight3 = st.columns(3)
+    
+    with insight1:
+        if product_sales:
+            # Product with highest discount rate
+            high_discount_products = product_df[product_df['revenue'] > 0].copy()
+            high_discount_products['discount_rate'] = (high_discount_products['discounts'] / high_discount_products['revenue'] * 100)
+            highest_discount_product = high_discount_products.nlargest(1, 'discount_rate').iloc[0]
+            
+            st.info(f"**🎯 Highest Discount Product:** {highest_discount_product['name']}\n\n"
+                   f"Discount rate: {highest_discount_product['discount_rate']:.1f}%\n"
+                   f"Total discounts: {format_currency(highest_discount_product['discounts'])}")
+    
+    with insight2:
+        if discount_by_hour:
+            peak_discount_hour = max(discount_by_hour.items(), key=lambda x: x[1])
+            st.info(f"**🕒 Peak Discount Hour:** {peak_discount_hour[0]}:00\n\n"
+                   f"{format_currency(peak_discount_hour[1])} in discounts\n"
+                   f"Best time for promotions")
+    
+    with insight3:
+        if discount_types:
+            most_used_type = max(discount_types.items(), key=lambda x: x[1])
+            type_name = {
+                'regular': 'Regular Discounts',
+                'loyalty': 'Loyalty Discounts',
+                'points': 'Points Discounts'
+            }.get(most_used_type[0], most_used_type[0])
+            
+            st.info(f"**💰 Most Used Discount:** {type_name}\n\n"
+                   f"{format_currency(most_used_type[1])} total\n"
+                   f"{most_used_type[1]/total_discounts*100:.1f}% of all discounts")
+            
     # Quick insights at the bottom
     st.markdown("---")
     st.subheader("📋 Quick Insights Summary")
