@@ -8745,7 +8745,7 @@ def loyalty_management():
     
     st.title("🎯 Loyalty Program Management")
     
-    tab1, tab2, tab3 = st.tabs(["Tier Management", "Customer Management",  "Program Settings"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Tier Management", "Customer Management", "Rewards Management", "Program Settings"])
     
     with tab1:
         loyalty_tier_management()
@@ -8753,6 +8753,8 @@ def loyalty_management():
     with tab2:
         loyalty_customer_management()
     
+    with tab3:
+        loyalty_rewards_management()
     
     with tab3:
         loyalty_settings_management()
@@ -8781,13 +8783,12 @@ def loyalty_tier_management():
     else:
         tier_data = []
         for tier_name, tier_info in tiers.items():
-            # FIXED: Handle missing 'benefits' key with default value
             benefits = tier_info.get('benefits', ['No benefits specified'])
             tier_data.append({
                 'Tier': tier_name,
                 'Minimum Points': tier_info.get('min_points', 0),
                 'Discount': f"{tier_info.get('discount', 0) * 100}%",
-                'Benefits': ', '.join(benefits)  # This was causing the KeyError
+                'Benefits': ', '.join(benefits)
             })
         
         st.dataframe(pd.DataFrame(tier_data))
@@ -8813,7 +8814,6 @@ def loyalty_tier_management():
         
         with col2:
             if edit_tier:
-                # FIXED: Handle missing 'benefits' key
                 current_benefits = tier_info.get('benefits', [])
                 benefits = st.text_area("Benefits (one per line)", value="\n".join(current_benefits), key="benefits")
             else:
@@ -8868,6 +8868,9 @@ def loyalty_customer_management():
     customers = loyalty_data.get('customers', {})
     tiers = loyalty_data.get('tiers', {})
     
+    # Process expired points
+    process_expired_points(loyalty_data)
+    
     # Search and filter
     st.subheader("Search Customers")
     col1, col2 = st.columns(2)
@@ -8899,25 +8902,38 @@ def loyalty_customer_management():
     else:
         for cust_id, customer in filtered_customers.items():
             with st.expander(f"{customer.get('name', 'Unknown')} - {cust_id}"):
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
                 
                 with col1:
                     st.write(f"**Phone:** {customer.get('phone', 'N/A')}")
                     st.write(f"**Email:** {customer.get('email', 'N/A')}")
                     st.write(f"**Tier:** {customer.get('tier', 'N/A')}")
-                    st.write(f"**Points:** {customer.get('points', 0)}")
+                    st.write(f"**Total Points:** {customer.get('points', 0)}")
                 
                 with col2:
                     st.write(f"**Join Date:** {customer.get('date_joined', 'N/A')}")
                     st.write(f"**Last Activity:** {customer.get('last_activity', 'N/A')}")
                     st.write(f"**Total Spent:** {format_currency(customer.get('total_spent', 0))}")
+                    st.write(f"**Visit Count:** {customer.get('visit_count', 0)}")
+                
+                with col3:
+                    # Display point breakdown
+                    point_breakdown = customer.get('point_breakdown', {})
+                    available_points = point_breakdown.get('available', 0)
+                    pending_expiry = point_breakdown.get('pending_expiry', 0)
                     
-                    # Quick actions
-                    if st.button("View Details", key=f"view_{cust_id}"):
-                        st.session_state.selected_customer = cust_id
+                    st.write(f"**Available Points:** {available_points}")
+                    if pending_expiry > 0:
+                        st.write(f"**Expiring Soon:** {pending_expiry}")
+                    
+                    # Next expiry date
+                    next_expiry = get_next_expiry_date(customer)
+                    if next_expiry:
+                        st.write(f"**Next Expiry:** {next_expiry}")
                 
                 # Points adjustment
                 with st.form(key=f"points_form_{cust_id}"):
+                    st.subheader("Points Management")
                     points_action = st.radio("Points Action", ["Add Points", "Subtract Points", "Set Points"], 
                                            key=f"points_action_{cust_id}")
                     points_value = st.number_input("Points", min_value=0, value=0, key=f"points_value_{cust_id}")
@@ -8925,15 +8941,12 @@ def loyalty_customer_management():
                     
                     if st.form_submit_button("Update Points"):
                         if points_action == "Add Points":
-                            customers[cust_id]['points'] = customers[cust_id].get('points', 0) + points_value
+                            add_points_to_customer(cust_id, points_value, points_reason, "manual_addition")
                         elif points_action == "Subtract Points":
-                            customers[cust_id]['points'] = max(0, customers[cust_id].get('points', 0) - points_value)
+                            subtract_points_from_customer(cust_id, points_value, points_reason)
                         else:  # Set Points
-                            customers[cust_id]['points'] = points_value
+                            set_customer_points(cust_id, points_value, points_reason)
                         
-                        customers[cust_id]['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
-                        loyalty_data['customers'] = customers
-                        save_data(loyalty_data, LOYALTY_FILE)
                         st.success("Points updated successfully!")
                         st.rerun()
     
@@ -8970,6 +8983,23 @@ def loyalty_customer_management():
                             if initial_points >= tier_info['min_points']:
                                 initial_tier = tier_name
                     
+                    # Initialize point breakdown
+                    point_breakdown = {}
+                    if initial_points > 0:
+                        expiry_days = loyalty_data.get('settings', {}).get('points_expiry_days', 365)
+                        expiry_date = (datetime.datetime.now() + datetime.timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+                        point_breakdown = {
+                            'available': initial_points,
+                            'pending_expiry': 0,
+                            'expiry_batches': [
+                                {
+                                    'points': initial_points,
+                                    'expiry_date': expiry_date,
+                                    'earned_date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                }
+                            ]
+                        }
+                    
                     customers[cust_id] = {
                         'id': cust_id,
                         'name': name,
@@ -8977,11 +9007,12 @@ def loyalty_customer_management():
                         'email': email,
                         'address': address,
                         'points': initial_points,
+                        'point_breakdown': point_breakdown,
                         'tier': initial_tier or 'Bronze',
                         'total_spent': 0,
                         'visit_count': 0,
-                        'date_joined': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
-                        'last_activity': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                        'date_joined': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'last_activity': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         'joined_by': st.session_state.user_info['username']
                     }
                     
@@ -9087,7 +9118,7 @@ def loyalty_rewards_management():
                     'active': active,
                     'max_redemptions': max_redemptions if max_redemptions > 0 else None,
                     'valid_days': valid_days,
-                    'created_at': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                    'created_at': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'created_by': st.session_state.user_info['username']
                 }
                 
@@ -9124,7 +9155,7 @@ def loyalty_settings_management():
     # Initialize settings if they don't exist
     if 'settings' not in loyalty_data:
         loyalty_data['settings'] = {
-            'points_per_dollar': 1.0,  # Changed to float
+            'points_per_dollar': 1.0,
             'points_value': 0.01,
             'signup_bonus': 100,
             'min_redemption': 100,
@@ -9147,33 +9178,33 @@ def loyalty_settings_management():
                 "Points per Dollar Spent", 
                 min_value=0.1, 
                 max_value=10.0, 
-                value=float(settings.get('points_per_dollar', 1.0)),  # Ensure float
+                value=float(settings.get('points_per_dollar', 1.0)),
                 step=0.1
             )
             points_value = st.number_input(
                 "Point Value (in dollars)", 
                 min_value=0.001, 
                 max_value=1.0, 
-                value=float(settings.get('points_value', 0.01)),  # Ensure float
+                value=float(settings.get('points_value', 0.01)),
                 step=0.001,
                 help="How much each point is worth when redeemed"
             )
             signup_bonus = st.number_input(
                 "Sign-up Bonus Points", 
                 min_value=0, 
-                value=int(settings.get('signup_bonus', 100))  # Ensure integer
+                value=int(settings.get('signup_bonus', 100))
             )
         
         with col2:
             min_redemption = st.number_input(
                 "Minimum Redemption Points", 
                 min_value=1, 
-                value=int(settings.get('min_redemption', 100))  # Ensure integer
+                value=int(settings.get('min_redemption', 100))
             )
             points_expiry = st.number_input(
                 "Points Expiry (days)", 
                 min_value=0, 
-                value=int(settings.get('points_expiry_days', 365)),  # Ensure integer
+                value=int(settings.get('points_expiry_days', 365)),
                 help="0 means points never expire"
             )
             auto_enroll = st.checkbox(
@@ -9187,29 +9218,226 @@ def loyalty_settings_management():
             birthday_bonus = st.number_input(
                 "Birthday Bonus Points", 
                 min_value=0, 
-                value=int(settings.get('birthday_bonus', 500))  # Ensure integer
+                value=int(settings.get('birthday_bonus', 500))
             )
         with col2:
             anniversary_bonus = st.number_input(
                 "Anniversary Bonus Points", 
                 min_value=0, 
-                value=int(settings.get('anniversary_bonus', 250))  # Ensure integer
+                value=int(settings.get('anniversary_bonus', 250))
             )
         
         if st.form_submit_button("💾 Save Settings"):
             loyalty_data['settings'] = {
-                'points_per_dollar': float(points_per_dollar),  # Convert to float
-                'points_value': float(points_value),  # Convert to float
-                'signup_bonus': int(signup_bonus),  # Convert to int
-                'min_redemption': int(min_redemption),  # Convert to int
-                'points_expiry_days': int(points_expiry),  # Convert to int
+                'points_per_dollar': float(points_per_dollar),
+                'points_value': float(points_value),
+                'signup_bonus': int(signup_bonus),
+                'min_redemption': int(min_redemption),
+                'points_expiry_days': int(points_expiry),
                 'auto_enroll': auto_enroll,
-                'birthday_bonus': int(birthday_bonus),  # Convert to int
-                'anniversary_bonus': int(anniversary_bonus)  # Convert to int
+                'birthday_bonus': int(birthday_bonus),
+                'anniversary_bonus': int(anniversary_bonus)
             }
             
             save_data(loyalty_data, LOYALTY_FILE)
             st.success("Loyalty program settings saved successfully!")
+
+# NEW POINT MANAGEMENT FUNCTIONS
+def process_expired_points(loyalty_data):
+    """Process and remove expired points for all customers"""
+    customers = loyalty_data.get('customers', {})
+    points_expiry_days = loyalty_data.get('settings', {}).get('points_expiry_days', 365)
+    
+    current_date = datetime.datetime.now().date()
+    points_expired = False
+    
+    for cust_id, customer in customers.items():
+        point_breakdown = customer.get('point_breakdown', {})
+        expiry_batches = point_breakdown.get('expiry_batches', [])
+        
+        # Filter out expired batches
+        valid_batches = []
+        expired_points = 0
+        
+        for batch in expiry_batches:
+            expiry_date = datetime.datetime.strptime(batch['expiry_date'], "%Y-%m-%d").date()
+            if expiry_date >= current_date:
+                valid_batches.append(batch)
+            else:
+                expired_points += batch['points']
+        
+        if expired_points > 0:
+            points_expired = True
+            # Update point breakdown
+            total_available = sum(batch['points'] for batch in valid_batches)
+            point_breakdown['available'] = total_available
+            point_breakdown['expiry_batches'] = valid_batches
+            
+            # Add to expiry history
+            expiry_history = customer.get('expiry_history', [])
+            expiry_history.append({
+                'points_expired': expired_points,
+                'expiry_date': current_date.strftime("%Y-%m-%d"),
+                'processed_date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+            customer['expiry_history'] = expiry_history
+            
+            # Update total points
+            customer['points'] = total_available
+    
+    if points_expired:
+        loyalty_data['customers'] = customers
+        save_data(loyalty_data, LOYALTY_FILE)
+
+def get_next_expiry_date(customer):
+    """Get the next expiry date for a customer's points"""
+    point_breakdown = customer.get('point_breakdown', {})
+    expiry_batches = point_breakdown.get('expiry_batches', [])
+    
+    if not expiry_batches:
+        return None
+    
+    # Find the earliest expiry date
+    expiry_dates = [datetime.datetime.strptime(batch['expiry_date'], "%Y-%m-%d").date() for batch in expiry_batches]
+    next_expiry = min(expiry_dates)
+    
+    return next_expiry.strftime("%Y-%m-%d")
+
+def add_points_to_customer(customer_id, points, reason, source="manual_addition"):
+    """Add points to customer with proper expiry tracking"""
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    
+    if customer_id not in customers:
+        return False
+    
+    customer = customers[customer_id]
+    points_expiry_days = loyalty_data.get('settings', {}).get('points_expiry_days', 365)
+    
+    # Calculate expiry date
+    expiry_date = (datetime.datetime.now() + datetime.timedelta(days=points_expiry_days)).strftime("%Y-%m-%d")
+    
+    # Initialize point breakdown if not exists
+    if 'point_breakdown' not in customer:
+        customer['point_breakdown'] = {
+            'available': 0,
+            'pending_expiry': 0,
+            'expiry_batches': []
+        }
+    
+    point_breakdown = customer['point_breakdown']
+    
+    # Add new expiry batch
+    new_batch = {
+        'points': points,
+        'expiry_date': expiry_date,
+        'earned_date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'source': source,
+        'reason': reason
+    }
+    
+    point_breakdown['expiry_batches'].append(new_batch)
+    point_breakdown['available'] = sum(batch['points'] for batch in point_breakdown['expiry_batches'])
+    
+    # Update total points
+    customer['points'] = point_breakdown['available']
+    customer['last_activity'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Add to points history
+    points_history = customer.get('points_history', [])
+    points_history.append({
+        'points_added': points,
+        'reason': reason,
+        'source': source,
+        'date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'total_after': customer['points']
+    })
+    customer['points_history'] = points_history
+    
+    loyalty_data['customers'] = customers
+    save_data(loyalty_data, LOYALTY_FILE)
+    return True
+
+def subtract_points_from_customer(customer_id, points, reason):
+    """Subtract points from customer using FIFO method"""
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    
+    if customer_id not in customers:
+        return False
+    
+    customer = customers[customer_id]
+    current_points = customer.get('points', 0)
+    
+    if points > current_points:
+        return False
+    
+    point_breakdown = customer.get('point_breakdown', {})
+    expiry_batches = point_breakdown.get('expiry_batches', [])
+    
+    # Sort batches by expiry date (FIFO - first to expire first)
+    expiry_batches.sort(key=lambda x: x['expiry_date'])
+    
+    points_to_subtract = points
+    updated_batches = []
+    
+    for batch in expiry_batches:
+        if points_to_subtract <= 0:
+            updated_batches.append(batch)
+            continue
+        
+        if batch['points'] <= points_to_subtract:
+            points_to_subtract -= batch['points']
+            # This entire batch is consumed
+        else:
+            # Partial consumption of this batch
+            updated_batch = batch.copy()
+            updated_batch['points'] = batch['points'] - points_to_subtract
+            updated_batches.append(updated_batch)
+            points_to_subtract = 0
+    
+    # Update point breakdown
+    point_breakdown['expiry_batches'] = updated_batches
+    point_breakdown['available'] = sum(batch['points'] for batch in updated_batches)
+    
+    # Update total points
+    customer['points'] = point_breakdown['available']
+    customer['last_activity'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Add to points history
+    points_history = customer.get('points_history', [])
+    points_history.append({
+        'points_subtracted': points,
+        'reason': reason,
+        'date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'total_after': customer['points']
+    })
+    customer['points_history'] = points_history
+    
+    loyalty_data['customers'] = customers
+    save_data(loyalty_data, LOYALTY_FILE)
+    return True
+
+def set_customer_points(customer_id, points, reason):
+    """Set customer points to a specific value"""
+    loyalty_data = load_data(LOYALTY_FILE)
+    customers = loyalty_data.get('customers', {})
+    
+    if customer_id not in customers:
+        return False
+    
+    customer = customers[customer_id]
+    current_points = customer.get('points', 0)
+    
+    if points == current_points:
+        return True
+    
+    if points > current_points:
+        # Add points
+        return add_points_to_customer(customer_id, points - current_points, reason, "manual_set")
+    else:
+        # Subtract points
+        return subtract_points_from_customer(customer_id, current_points - points, reason)
 
 # LOYALTY FUNCTIONS FOR POS INTEGRATION
 def apply_loyalty_discount(customer_id, transaction_total):
@@ -9246,27 +9474,30 @@ def redeem_loyalty_points(customer_id, points_to_redeem):
     if customer_id not in customers:
         return False, "Customer not found"
     
+    # Process expired points first
+    process_expired_points(loyalty_data)
+    
     customer = customers[customer_id]
     current_points = customer.get('points', 0)
     
     if points_to_redeem > current_points:
         return False, "Not enough points"
     
+    # Subtract points using proper tracking
+    if not subtract_points_from_customer(customer_id, points_to_redeem, "reward_redemption"):
+        return False, "Error processing points redemption"
+    
     # Calculate discount value
     settings = loyalty_data.get('settings', {})
     points_value = settings.get('points_value', 0.01)
     discount_amount = points_to_redeem * points_value
-    
-    # Update customer points
-    customer['points'] = current_points - points_to_redeem
-    customer['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
     
     # Add to redemption history
     redemptions = customer.get('redemptions', [])
     redemptions.append({
         'points_used': points_to_redeem,
         'discount_amount': discount_amount,
-        'date_redeemed': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+        'date_redeemed': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'redeemed_by': st.session_state.user_info['username']
     })
     customer['redemptions'] = redemptions
@@ -9285,16 +9516,22 @@ def update_customer_loyalty(customer_id, transaction_total, points_earned, point
     if customer_id not in customers:
         return
     
+    # Process expired points first
+    process_expired_points(loyalty_data)
+    
     customer = customers[customer_id]
     
-    # Update points
-    customer['points'] = customer.get('points', 0) + points_earned - points_redeemed
+    # Add earned points with proper tracking
+    if points_earned > 0:
+        add_points_to_customer(customer_id, points_earned, "purchase_reward", "purchase")
+    
+    # Update customer statistics
     customer['total_spent'] = customer.get('total_spent', 0) + transaction_total
     customer['visit_count'] = customer.get('visit_count', 0) + 1
-    customer['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+    customer['last_activity'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # Check for tier upgrade
-    current_points = customer['points']
+    current_points = customer.get('points', 0)
     current_tier = customer.get('tier', 'Bronze')
     
     # Find the highest tier the customer qualifies for
@@ -9314,7 +9551,7 @@ def update_customer_loyalty(customer_id, transaction_total, points_earned, point
         tier_history.append({
             'from_tier': current_tier,
             'to_tier': new_tier,
-            'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+            'date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'points_at_change': current_points
         })
         customer['tier_history'] = tier_history
@@ -9596,6 +9833,7 @@ def reports_analytics():
     for r in filtered_returns:
         total_returns += r.get('total_refund', 0)
     
+    # Safe calculations with zero division checks
     net_sales = total_sales - total_returns
     avg_transaction_value = total_sales / transaction_count if transaction_count > 0 else 0
     return_rate = (total_returns / total_sales * 100) if total_sales > 0 else 0
@@ -9677,20 +9915,35 @@ def reports_analytics():
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Daily Sales Trend")
-            st.line_chart(chart_data.set_index('Date')[['Sales', 'Returns', 'Net Sales']])
+            if not chart_data.empty:
+                st.line_chart(chart_data.set_index('Date')[['Sales', 'Returns', 'Net Sales']])
+            else:
+                st.info("No sales data available for the selected period")
         
         with col2:
             st.subheader("Discounts & Transactions")
-            st.bar_chart(chart_data.set_index('Date')[['Discounts', 'Transactions']])
+            if not chart_data.empty:
+                st.bar_chart(chart_data.set_index('Date')[['Discounts', 'Transactions']])
+            else:
+                st.info("No transaction data available")
             
             # Quick stats
-            st.info(f"""
-            **Period Summary:**
-            - Total Days: {len(daily_sales)}
-            - Best Day: {format_currency(max(daily_sales.values()))}
-            - Average Daily: {format_currency(sum(daily_sales.values()) / len(daily_sales))}
-            - Total Discounts: {format_currency(sum(daily_discounts.values()))}
-            """)
+            if daily_sales:
+                total_days = len(daily_sales)
+                best_day_value = max(daily_sales.values())
+                best_day_date = [date for date, value in daily_sales.items() if value == best_day_value][0]
+                avg_daily = sum(daily_sales.values()) / total_days if total_days > 0 else 0
+                total_period_discounts = sum(daily_discounts.values())
+                
+                st.info(f"""
+                **Period Summary:**
+                - Total Days: {total_days}
+                - Best Day: {best_day_date.strftime('%b %d')} ({format_currency(best_day_value)})
+                - Average Daily: {format_currency(avg_daily)}
+                - Total Discounts: {format_currency(total_period_discounts)}
+                """)
+            else:
+                st.info("No data available for period summary")
     
     with tab2:
         st.header("Product Performance")
@@ -9748,12 +10001,15 @@ def reports_analytics():
                 top_products['net_revenue'] = top_products['revenue'] - top_products['discounts']
                 top_products['discount_rate'] = (top_products['discounts'] / top_products['revenue'] * 100).round(1)
                 
+                # Replace infinite values and NaN with 0
+                top_products = top_products.replace([float('inf'), -float('inf')], 0).fillna(0)
+                
                 st.dataframe(
                     top_products.style.format({
                         'revenue': lambda x: format_currency(x),
                         'discounts': lambda x: format_currency(x),
                         'net_revenue': lambda x: format_currency(x),
-                        'discount_rate': lambda x: f"{x}%",
+                        'discount_rate': lambda x: f"{x}%" if pd.notnull(x) else "0%",
                         'quantity': lambda x: f"{x:,.0f}"
                     }),
                     height=400
@@ -9762,23 +10018,32 @@ def reports_analytics():
             with col2:
                 st.subheader("Sales by Category")
                 # Create bar chart for categories
-                category_chart_data = category_df.sort_values('revenue', ascending=False).head(10)
-                st.bar_chart(category_chart_data['revenue'])
+                if not category_df.empty:
+                    category_chart_data = category_df.sort_values('revenue', ascending=False).head(10)
+                    st.bar_chart(category_chart_data['revenue'])
+                else:
+                    st.info("No category data available")
                 
                 st.subheader("Top Categories with Discounts")
-                top_categories = category_df.nlargest(5, 'revenue').copy()
-                top_categories['net_revenue'] = top_categories['revenue'] - top_categories['discounts']
-                top_categories['discount_rate'] = (top_categories['discounts'] / top_categories['revenue'] * 100).round(1)
-                
-                st.dataframe(
-                    top_categories.style.format({
-                        'revenue': lambda x: format_currency(x),
-                        'discounts': lambda x: format_currency(x),
-                        'net_revenue': lambda x: format_currency(x),
-                        'discount_rate': lambda x: f"{x}%",
-                        'quantity': lambda x: f"{x:,.0f}"
-                    })
-                )
+                if not category_df.empty:
+                    top_categories = category_df.nlargest(5, 'revenue').copy()
+                    top_categories['net_revenue'] = top_categories['revenue'] - top_categories['discounts']
+                    top_categories['discount_rate'] = (top_categories['discounts'] / top_categories['revenue'] * 100).round(1)
+                    
+                    # Replace infinite values and NaN with 0
+                    top_categories = top_categories.replace([float('inf'), -float('inf')], 0).fillna(0)
+                    
+                    st.dataframe(
+                        top_categories.style.format({
+                            'revenue': lambda x: format_currency(x),
+                            'discounts': lambda x: format_currency(x),
+                            'net_revenue': lambda x: format_currency(x),
+                            'discount_rate': lambda x: f"{x}%" if pd.notnull(x) else "0%",
+                            'quantity': lambda x: f"{x:,.0f}"
+                        })
+                    )
+                else:
+                    st.info("No category discount data available")
         else:
             st.info("No product sales data for the selected period")
     
@@ -9809,6 +10074,9 @@ def reports_analytics():
             customer_df['avg_spend'] = customer_df['total_spent'] / customer_df['transactions']
             customer_df['discount_rate'] = (customer_df['discounts_received'] / customer_df['total_spent'] * 100).round(1)
             
+            # Replace infinite values and NaN with 0
+            customer_df = customer_df.replace([float('inf'), -float('inf')], 0).fillna(0)
+            
             col1, col2 = st.columns(2)
             
             with col1:
@@ -9819,7 +10087,7 @@ def reports_analytics():
                         'total_spent': lambda x: format_currency(x),
                         'discounts_received': lambda x: format_currency(x),
                         'avg_spend': lambda x: format_currency(x),
-                        'discount_rate': lambda x: f"{x}%",
+                        'discount_rate': lambda x: f"{x}%" if pd.notnull(x) else "0%",
                         'transactions': lambda x: f"{x:,.0f}"
                     })
                 )
@@ -9835,7 +10103,8 @@ def reports_analytics():
                 st.bar_chart(discount_groups)
                 
                 st.metric("Total Customers", len(customer_df))
-                st.metric("Avg. Discount Rate", f"{customer_df['discount_rate'].mean():.1f}%")
+                avg_discount_rate = customer_df['discount_rate'].mean() if len(customer_df) > 0 else 0
+                st.metric("Avg. Discount Rate", f"{avg_discount_rate:.1f}%")
         else:
             st.info("No customer data available for the selected period")
     
@@ -9860,6 +10129,9 @@ def reports_analytics():
             payment_df['avg_amount'] = payment_df['amount'] / payment_df['count']
             payment_df['discount_rate'] = (payment_df['discounts'] / payment_df['amount'] * 100).round(1)
             
+            # Replace infinite values and NaN with 0
+            payment_df = payment_df.replace([float('inf'), -float('inf')], 0).fillna(0)
+            
             col1, col2 = st.columns(2)
             
             with col1:
@@ -9869,7 +10141,7 @@ def reports_analytics():
                         'amount': lambda x: format_currency(x),
                         'discounts': lambda x: format_currency(x),
                         'avg_amount': lambda x: format_currency(x),
-                        'discount_rate': lambda x: f"{x}%",
+                        'discount_rate': lambda x: f"{x}%" if pd.notnull(x) else "0%",
                         'count': lambda x: f"{x:,.0f}"
                     })
                 )
@@ -9999,6 +10271,7 @@ def reports_analytics():
         ])
         
         # Report customization
+        selected_columns = []
         if report_type == "Sales Detailed Report":
             selected_columns = st.multiselect(
                 "Select Columns",
@@ -10019,6 +10292,24 @@ def reports_analytics():
                 options=['Product Name', 'Category', 'Brand', 'Quantity Sold', 'Revenue', 'Discounts', 'Net Revenue', 'Avg Price', 'Discount Rate'],
                 default=['Product Name', 'Quantity Sold', 'Revenue', 'Discounts', 'Net Revenue']
             )
+        elif report_type == "Customer Analysis Report":
+            selected_columns = st.multiselect(
+                "Select Columns",
+                options=['Customer ID', 'Total Transactions', 'Total Spent', 'Discounts Received', 'Average Spend', 'Discount Rate', 'Last Purchase'],
+                default=['Customer ID', 'Total Spent', 'Discounts Received', 'Average Spend']
+            )
+        elif report_type == "Payment Method Report":
+            selected_columns = st.multiselect(
+                "Select Columns",
+                options=['Payment Method', 'Transaction Count', 'Total Amount', 'Total Discounts', 'Average Amount', 'Discount Rate'],
+                default=['Payment Method', 'Transaction Count', 'Total Amount', 'Total Discounts']
+            )
+        elif report_type == "Daily Sales Summary":
+            selected_columns = st.multiselect(
+                "Select Columns",
+                options=['Date', 'Total Sales', 'Total Discounts', 'Total Returns', 'Net Sales', 'Transaction Count', 'Average Transaction'],
+                default=['Date', 'Total Sales', 'Net Sales', 'Transaction Count']
+            )
         
         # Format options
         export_format = st.radio("Export Format", ["CSV", "Excel"], horizontal=True)
@@ -10026,6 +10317,8 @@ def reports_analytics():
         if st.button("🚀 Generate & Export Report", type="primary"):
             with st.spinner("Generating report..."):
                 try:
+                    df = pd.DataFrame()
+                    
                     if report_type == "Sales Detailed Report":
                         report_data = []
                         for t in filtered_transactions:
@@ -10073,6 +10366,7 @@ def reports_analytics():
                         report_data = []
                         for barcode, data in product_sales.items():
                             discount_rate = (data['discounts'] / data['revenue'] * 100) if data['revenue'] > 0 else 0
+                            avg_price = data['revenue'] / data['quantity'] if data['quantity'] > 0 else 0
                             report_data.append({
                                 'Product Name': data['name'],
                                 'Category': data['category'],
@@ -10081,78 +10375,135 @@ def reports_analytics():
                                 'Revenue': data['revenue'],
                                 'Discounts': data['discounts'],
                                 'Net Revenue': data['revenue'] - data['discounts'],
-                                'Avg Price': data['revenue'] / data['quantity'] if data['quantity'] > 0 else 0,
+                                'Avg Price': avg_price,
                                 'Discount Rate': f"{discount_rate:.1f}%"
                             })
                         df = pd.DataFrame(report_data)
                     
-                    # Filter selected columns
-                    if selected_columns:
-                        df = df[selected_columns]
+                    elif report_type == "Customer Analysis Report":
+                        report_data = []
+                        for customer_id, data in customer_spending.items():
+                            discount_rate = (data['discounts_received'] / data['total_spent'] * 100) if data['total_spent'] > 0 else 0
+                            avg_spend = data['total_spent'] / data['transactions'] if data['transactions'] > 0 else 0
+                            report_data.append({
+                                'Customer ID': customer_id,
+                                'Total Transactions': data['transactions'],
+                                'Total Spent': data['total_spent'],
+                                'Discounts Received': data['discounts_received'],
+                                'Average Spend': avg_spend,
+                                'Discount Rate': f"{discount_rate:.1f}%",
+                                'Last Purchase': data['last_purchase']
+                            })
+                        df = pd.DataFrame(report_data)
+                    
+                    elif report_type == "Payment Method Report":
+                        report_data = []
+                        for method, data in payment_methods.items():
+                            discount_rate = (data['discounts'] / data['amount'] * 100) if data['amount'] > 0 else 0
+                            avg_amount = data['amount'] / data['count'] if data['count'] > 0 else 0
+                            report_data.append({
+                                'Payment Method': method,
+                                'Transaction Count': data['count'],
+                                'Total Amount': data['amount'],
+                                'Total Discounts': data['discounts'],
+                                'Average Amount': avg_amount,
+                                'Discount Rate': f"{discount_rate:.1f}%"
+                            })
+                        df = pd.DataFrame(report_data)
+                    
+                    elif report_type == "Daily Sales Summary":
+                        report_data = []
+                        for date in daily_sales.keys():
+                            sales = daily_sales[date]
+                            discounts = daily_discounts[date]
+                            returns = daily_returns[date]
+                            transactions_count = daily_transactions[date]
+                            net_sales = sales - returns
+                            avg_transaction = sales / transactions_count if transactions_count > 0 else 0
+                            
+                            report_data.append({
+                                'Date': date.strftime('%Y-%m-%d'),
+                                'Total Sales': sales,
+                                'Total Discounts': discounts,
+                                'Total Returns': returns,
+                                'Net Sales': net_sales,
+                                'Transaction Count': transactions_count,
+                                'Average Transaction': avg_transaction
+                            })
+                        df = pd.DataFrame(report_data)
+                    
+                    # Filter selected columns if any are selected and dataframe is not empty
+                    if not df.empty and selected_columns:
+                        # Only include columns that exist in the dataframe
+                        available_columns = [col for col in selected_columns if col in df.columns]
+                        if available_columns:
+                            df = df[available_columns]
                     
                     # Display preview
                     st.subheader("Report Preview")
-                    st.dataframe(df.head(10))
-                    
-                    # Export functionality
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"{report_type.replace(' ', '_')}_{start_date}_to_{end_date}_{timestamp}"
-                    
-                    if export_format == "CSV":
-                        csv = df.to_csv(index=False)
-                        st.download_button(
-                            label="📄 Download CSV",
-                            data=csv,
-                            file_name=f"{filename}.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-                    
-                    else:  # Excel
-                        excel_buffer = io.BytesIO()
-                        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                            df.to_excel(writer, index=False, sheet_name='Report')
-                            
-                            # Add formatting
-                            workbook = writer.book
-                            worksheet = writer.sheets['Report']
-                            
-                            # Add header format
-                            header_format = workbook.add_format({
-                                'bold': True,
-                                'text_wrap': True,
-                                'valign': 'top',
-                                'fg_color': '#D7E4BC',
-                                'border': 1
-                            })
-                            
-                            # Write column headers with format
-                            for col_num, value in enumerate(df.columns.values):
-                                worksheet.write(0, col_num, value, header_format)
-                            
-                            # Auto-adjust columns width
-                            for i, col in enumerate(df.columns):
-                                max_len = max(
-                                    df[col].astype(str).map(len).max(),
-                                    len(col)
-                                ) + 2
-                                worksheet.set_column(i, i, max_len)
+                    if not df.empty:
+                        st.dataframe(df.head(10))
                         
-                        st.download_button(
-                            label="📊 Download Excel",
-                            data=excel_buffer.getvalue(),
-                            file_name=f"{filename}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
-                        )
-                    
-                    # Show export summary
-                    st.success(f"✅ Report generated with {len(df)} records")
-                    st.info(f"**Time Period:** {start_date} to {end_date}")
+                        # Export functionality
+                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"{report_type.replace(' ', '_')}_{start_date}_to_{end_date}_{timestamp}"
+                        
+                        if export_format == "CSV":
+                            csv = df.to_csv(index=False)
+                            st.download_button(
+                                label="📄 Download CSV",
+                                data=csv,
+                                file_name=f"{filename}.csv",
+                                mime="text/csv",
+                                use_container_width=True
+                            )
+                        
+                        else:  # Excel
+                            excel_buffer = io.BytesIO()
+                            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                                df.to_excel(writer, index=False, sheet_name='Report')
+                                
+                                # Add formatting
+                                workbook = writer.book
+                                worksheet = writer.sheets['Report']
+                                
+                                # Add header format
+                                header_format = workbook.add_format({
+                                    'bold': True,
+                                    'text_wrap': True,
+                                    'valign': 'top',
+                                    'fg_color': '#D7E4BC',
+                                    'border': 1
+                                })
+                                
+                                # Write column headers with format
+                                for col_num, value in enumerate(df.columns.values):
+                                    worksheet.write(0, col_num, value, header_format)
+                                
+                                # Auto-adjust columns width
+                                for i, col in enumerate(df.columns):
+                                    max_len = max(
+                                        df[col].astype(str).map(len).max(),
+                                        len(col)
+                                    ) + 2
+                                    worksheet.set_column(i, i, max_len)
+                            
+                            st.download_button(
+                                label="📊 Download Excel",
+                                data=excel_buffer.getvalue(),
+                                file_name=f"{filename}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True
+                            )
+                        
+                        # Show export summary
+                        st.success(f"✅ Report generated with {len(df)} records")
+                        st.info(f"**Time Period:** {start_date} to {end_date}")
+                    else:
+                        st.warning("No data available for the selected report type and period")
                     
                 except Exception as e:
                     st.error(f"Error generating report: {str(e)}")
-    
     
     # Quick insights at the bottom with discount focus
     st.markdown("---")
@@ -10161,15 +10512,20 @@ def reports_analytics():
     insight1, insight2, insight3 = st.columns(3)
     
     with insight1:
-        if product_sales:
+        if product_sales and len(product_df) > 0:
             # Product with highest discount rate
             high_discount_products = product_df[product_df['revenue'] > 0].copy()
-            high_discount_products['discount_rate'] = (high_discount_products['discounts'] / high_discount_products['revenue'] * 100)
-            highest_discount_product = high_discount_products.nlargest(1, 'discount_rate').iloc[0]
-            
-            st.info(f"**🎯 Highest Discount Product:** {highest_discount_product['name']}\n\n"
-                   f"Discount rate: {highest_discount_product['discount_rate']:.1f}%\n"
-                   f"Total discounts: {format_currency(highest_discount_product['discounts'])}")
+            if len(high_discount_products) > 0:
+                high_discount_products['discount_rate'] = (high_discount_products['discounts'] / high_discount_products['revenue'] * 100)
+                highest_discount_product = high_discount_products.nlargest(1, 'discount_rate').iloc[0]
+                
+                st.info(f"**🎯 Highest Discount Product:** {highest_discount_product['name']}\n\n"
+                       f"Discount rate: {highest_discount_product['discount_rate']:.1f}%\n"
+                       f"Total discounts: {format_currency(highest_discount_product['discounts'])}")
+            else:
+                st.info("**🎯 Highest Discount Product:** No discount data")
+        else:
+            st.info("**🎯 Highest Discount Product:** No product data")
     
     with insight2:
         if discount_by_hour:
@@ -10177,9 +10533,11 @@ def reports_analytics():
             st.info(f"**🕒 Peak Discount Hour:** {peak_discount_hour[0]}:00\n\n"
                    f"{format_currency(peak_discount_hour[1])} in discounts\n"
                    f"Best time for promotions")
+        else:
+            st.info("**🕒 Peak Discount Hour:** No discount timing data")
     
     with insight3:
-        if discount_types:
+        if discount_types and total_discounts > 0:
             most_used_type = max(discount_types.items(), key=lambda x: x[1])
             type_name = {
                 'regular': 'Regular Discounts',
@@ -10187,36 +10545,14 @@ def reports_analytics():
                 'points': 'Points Discounts'
             }.get(most_used_type[0], most_used_type[0])
             
+            discount_percentage = (most_used_type[1] / total_discounts * 100) if total_discounts > 0 else 0
+            
             st.info(f"**💰 Most Used Discount:** {type_name}\n\n"
                    f"{format_currency(most_used_type[1])} total\n"
-                   f"{most_used_type[1]/total_discounts*100:.1f}% of all discounts")
-            
-    # Quick insights at the bottom
-    st.markdown("---")
-    st.subheader("📋 Quick Insights Summary")
-    
-    insight1, insight2, insight3 = st.columns(3)
-    
-    with insight1:
-        if product_sales:
-            best_seller = max(product_sales.items(), key=lambda x: x[1]['quantity'])
-            st.info(f"**🏆 Best Seller:** {best_seller[1]['name']}\n\n"
-                   f"{best_seller[1]['quantity']} units sold\n"
-                   f"{format_currency(best_seller[1]['revenue'])} revenue")
-    
-    with insight2:
-        if daily_sales:
-            busiest_day = max(daily_sales.items(), key=lambda x: x[1])
-            st.info(f"**📅 Peak Sales Day:** {busiest_day[0].strftime('%b %d')}\n\n"
-                   f"{format_currency(busiest_day[1])} sales\n"
-                   f"{daily_transactions[busiest_day[0]]} transactions")
-    
-    with insight3:
-        if payment_methods:
-            popular_payment = max(payment_methods.items(), key=lambda x: x[1]['count'])
-            st.info(f"**💳 Preferred Payment:** {popular_payment[0]}\n\n"
-                   f"{popular_payment[1]['count']} transactions\n"
-                   f"{format_currency(popular_payment[1]['amount'])} total")
+                   f"{discount_percentage:.1f}% of all discounts")
+        else:
+            st.info("**💰 Most Used Discount:** No discounts applied\n\n"
+                   f"No discount data available for the period")
 
 # Shifts Management
 def shifts_management():
