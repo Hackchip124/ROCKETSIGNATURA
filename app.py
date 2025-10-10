@@ -1454,6 +1454,498 @@ def export_transactions_to_csv(transactions):
     else:
         st.warning("No data to export")
 
+def display_cart_and_checkout():
+    settings = load_data(SETTINGS_FILE)
+    payment_charges = settings.get('payment_charges', {
+        "cash": 0.0,
+        "credit_card": 2.0,
+        "debit_card": 1.0,
+        "mobile_payment": 1.5,
+        "bank_transfer": 0.5,
+        "international_card": 3.0
+    })
+    
+    st.header("Current Sale")
+    
+    # Initialize loyalty session state
+    if 'loyalty_customer_id' not in st.session_state:
+        st.session_state.loyalty_customer_id = None
+    if 'loyalty_points_to_redeem' not in st.session_state:
+        st.session_state.loyalty_points_to_redeem = 0
+    if 'loyalty_customer_data' not in st.session_state:
+        st.session_state.loyalty_customer_data = None
+    
+    # Create a copy of the cart items to avoid modification during iteration
+    cart_items = list(st.session_state.cart.items())
+    items_to_remove = []
+    
+    if cart_items:
+        for barcode, item in cart_items:
+            with st.container():
+                col1, col2, col3, col4 = st.columns([4, 2, 2, 1])
+                with col1:
+                    st.write(f"**{item['name']}**")
+                    if item.get('description'):
+                        with st.expander("Description"):
+                            st.write(item['description'])
+                with col2:
+                    new_qty = st.number_input(
+                        "Qty", 
+                        min_value=1, 
+                        max_value=100, 
+                        value=item['quantity'], 
+                        key=f"edit_{barcode}"
+                    )
+                    if new_qty != item['quantity']:
+                        st.session_state.cart[barcode]['quantity'] = new_qty
+                with col3:
+                    st.write(f"{format_currency(item['price'] * item['quantity'])}")
+                with col4:
+                    if st.button("❌", key=f"remove_{barcode}"):
+                        items_to_remove.append(barcode)
+        
+        # Remove items after iteration is complete
+        for barcode in items_to_remove:
+            if barcode in st.session_state.cart:
+                del st.session_state.cart[barcode]
+        
+        # Recalculate totals after potential changes
+        subtotal = sum(item['price'] * item['quantity'] for item in st.session_state.cart.values())
+        tax_rate = settings.get('tax_rate', 0.0)
+        tax_amount = subtotal * tax_rate
+        total_before_discounts = subtotal + tax_amount
+        
+        # Apply offers
+        total_after_offers = total_before_discounts
+        offer_discount = 0
+        
+        # Check for selected offer
+        selected_offer_name = st.session_state.get('selected_offer', None)
+        if selected_offer_name:
+            offers = load_data(OFFERS_FILE)
+            for offer in offers.values():
+                if offer['name'] == selected_offer_name and offer.get('active', True):
+                    offer_discount = apply_selected_offer_to_cart(st.session_state.cart, total_before_discounts, offer)
+                    total_after_offers = total_before_discounts - offer_discount
+                    break
+        
+        # Apply discounts
+        discounts = load_data(DISCOUNTS_FILE)
+        active_discounts = [d for d in discounts.values() if d['active']]
+        
+        discount_amount = 0
+        if active_discounts:
+            discount_options = {d['name']: d for d in active_discounts}
+            selected_discount = st.selectbox("Apply Discount", [""] + list(discount_options.keys()))
+            
+            if selected_discount:
+                discount = discount_options[selected_discount]
+                if discount['type'] == 'percentage':
+                    discount_amount = total_after_offers * (discount['value'] / 100)
+                else:
+                    discount_amount = discount['value']
+                
+                total_after_discounts = total_after_offers - discount_amount
+            else:
+                total_after_discounts = total_after_offers
+        else:
+            total_after_discounts = total_after_offers
+        
+        # LOYALTY SECTION
+        st.markdown("---")
+        st.subheader("🎯 Loyalty Program")
+        
+        loyalty_data = load_data(LOYALTY_FILE)
+        customers = loyalty_data.get('customers', {})
+        
+        # Customer lookup form
+        with st.form("loyalty_lookup_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                customer_phone = st.text_input("Customer Phone", key="loyalty_phone_input")
+            with col2:
+                customer_id_input = st.text_input("Customer ID", key="customer_id_input")
+            
+            if st.form_submit_button("🔍 Find Customer", use_container_width=True):
+                customer_found = None
+                customer_id = None
+                
+                # Search by phone
+                if customer_phone:
+                    for cust_id, cust_data in customers.items():
+                        if cust_data.get('phone') == customer_phone:
+                            customer_found = cust_data
+                            customer_id = cust_id
+                            break
+                
+                # Search by ID
+                if not customer_found and customer_id_input and customer_id_input in customers:
+                    customer_found = customers[customer_id_input]
+                    customer_id = customer_id_input
+                
+                if customer_found:
+                    st.session_state.loyalty_customer_id = customer_id
+                    st.session_state.loyalty_customer_data = customer_found
+                    st.success(f"✅ Customer found: {customer_found.get('name', 'Unknown')}")
+                else:
+                    st.session_state.loyalty_customer_id = None
+                    st.session_state.loyalty_customer_data = None
+                    st.warning("❌ Customer not found")
+        
+        # Display customer info if found
+        loyalty_discount = 0
+        if st.session_state.loyalty_customer_data:
+            customer = st.session_state.loyalty_customer_data
+            
+            # Clear customer button
+            if st.button("🗑️ Clear Customer", key="clear_loyalty_customer", use_container_width=True):
+                st.session_state.loyalty_customer_id = None
+                st.session_state.loyalty_points_to_redeem = 0
+                st.session_state.loyalty_customer_data = None
+                st.rerun()
+            
+            st.info(f"**{customer.get('name', 'Unknown')}** - {customer.get('tier', 'Bronze')} Tier")
+            st.info(f"Points: {customer.get('points', 0)}")
+            
+            # Apply tier discount
+            current_tier = customer.get('tier', 'Bronze')
+            tier_settings = loyalty_data.get('tiers', {}).get(current_tier, {})
+            tier_discount_percent = tier_settings.get('discount', 0)
+            
+            if tier_discount_percent > 0:
+                loyalty_discount = total_after_discounts * tier_discount_percent
+                st.success(f"🏆 Tier discount ({current_tier}): -{format_currency(loyalty_discount)}")
+            
+            # Points redemption
+            max_points_to_redeem = customer.get('points', 0)
+            points_value = loyalty_data.get('settings', {}).get('points_value', 0.01)
+            
+            if max_points_to_redeem > 0:
+                st.session_state.loyalty_points_to_redeem = st.number_input(
+                    "Points to redeem", 
+                    min_value=0, 
+                    max_value=min(max_points_to_redeem, int(total_after_discounts / points_value)),
+                    value=st.session_state.loyalty_points_to_redeem,
+                    step=10,
+                    key="points_redeem_input"
+                )
+        
+        # Calculate points discount
+        points_discount = st.session_state.loyalty_points_to_redeem * loyalty_data.get('settings', {}).get('points_value', 0.01)
+        
+        if st.session_state.loyalty_points_to_redeem > 0:
+            st.success(f"🎉 Redeeming {st.session_state.loyalty_points_to_redeem} points: -{format_currency(points_discount)}")
+        
+        # Calculate final total after all discounts
+        total_after_loyalty = total_after_discounts - loyalty_discount
+        total_after_points = total_after_loyalty - points_discount
+        final_total_before_charges = max(total_after_points, 0)
+        
+        # Calculate loyalty points to earn (for display only)
+        if st.session_state.loyalty_customer_id:
+            points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
+            loyalty_points_earned = int(final_total_before_charges * points_per_dollar)
+            st.info(f"📈 Points to earn: {loyalty_points_earned}")
+        
+        st.markdown("---")
+        
+        # PAYMENT SECTION
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("💰 Summary")
+            st.write(f"Subtotal: {format_currency(subtotal)}")
+            st.write(f"Tax ({tax_rate*100}%): {format_currency(tax_amount)}")
+            st.write(f"Total Before Discounts: {format_currency(total_before_discounts)}")
+            
+            if offer_discount > 0:
+                st.write(f"Offer Discount: -{format_currency(offer_discount)}")
+            
+            if discount_amount > 0:
+                st.write(f"Manual Discount: -{format_currency(discount_amount)}")
+            
+            if loyalty_discount > 0:
+                st.write(f"Loyalty Discount: -{format_currency(loyalty_discount)}")
+            
+            if points_discount > 0:
+                st.write(f"Points Discount: -{format_currency(points_discount)}")
+            
+            st.write(f"**Net Amount: {format_currency(final_total_before_charges)}**")
+        
+        with col2:
+            st.subheader("💳 Payment")
+            payment_method = st.selectbox("Payment Method", 
+                                        ["Cash", "Credit Card", "Debit Card", "Mobile Payment", "Bank Transfer", "International Card"])
+            
+            # Calculate payment charge
+            payment_method_key = payment_method.lower().replace(" ", "_")
+            payment_charge_percent = payment_charges.get(payment_method_key, 0.0)
+            payment_charge_amount = final_total_before_charges * (payment_charge_percent / 100)
+            
+            total_with_payment_charge = final_total_before_charges + payment_charge_amount
+            
+            if payment_charge_percent > 0:
+                st.info(f"💸 Payment Fee ({payment_charge_percent}%): +{format_currency(payment_charge_amount)}")
+                st.write(f"**Amount Due: {format_currency(total_with_payment_charge)}**")
+            
+            amount_tendered = st.number_input("Amount Tendered", min_value=0.0, value=total_with_payment_charge, step=1.0)
+            
+            change = amount_tendered - total_with_payment_charge
+            if change >= 0:
+                st.success(f"Change: {format_currency(change)}")
+            else:
+                st.error(f"Short by: {format_currency(abs(change))}")
+            
+            if st.button("✅ Complete Sale", type="primary", use_container_width=True):
+                if amount_tendered < total_with_payment_charge:
+                    st.error("❌ Amount tendered is less than total")
+                else:
+                    # Process the sale with all discount information
+                    success = process_sale(
+                        st.session_state.cart,
+                        payment_method,
+                        payment_charge_percent,
+                        payment_charge_amount,
+                        amount_tendered,
+                        selected_offer_name,
+                        st.session_state.loyalty_customer_id,
+                        st.session_state.loyalty_points_to_redeem,
+                        loyalty_discount,
+                        offer_discount,
+                        discount_amount,
+                        points_discount,
+                        final_total_before_charges
+                    )
+                    
+                    if success:
+                        st.success("🎉 Sale completed successfully!")
+                        # Reset cart and loyalty state
+                        st.session_state.cart = {}
+                        st.session_state.selected_offer = None
+                        st.session_state.loyalty_customer_id = None
+                        st.session_state.loyalty_points_to_redeem = 0
+                        st.session_state.loyalty_customer_data = None
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to process sale")
+    
+    else:
+        st.info("🛒 Cart is empty")
+
+# Updated process_sale function to handle all discount types
+def process_sale(cart_items, payment_method, payment_charge_percent, payment_charge_amount, amount_tendered, selected_offer=None, customer_id=None, points_to_redeem=0, loyalty_discount=0, offer_discount=0, manual_discount=0, points_discount=0, net_amount=0):
+    try:
+        # Load necessary data
+        products = load_data(PRODUCTS_FILE)
+        inventory = load_data(INVENTORY_FILE)
+        transactions = load_data(TRANSACTIONS_FILE)
+        loyalty_data = load_data(LOYALTY_FILE)
+        customers = loyalty_data.get('customers', {})
+        settings = load_data(SETTINGS_FILE)
+        
+        # Calculate base totals
+        subtotal = sum(item['price'] * item['quantity'] for item in cart_items.values())
+        tax_rate = settings.get('tax_rate', 0.0)
+        tax_amount = subtotal * tax_rate
+        total_before_discounts = subtotal + tax_amount
+        
+        # Calculate total discount from all sources
+        total_discount = offer_discount + loyalty_discount + manual_discount + points_discount
+        
+        # Use provided net_amount or calculate it
+        if net_amount == 0:
+            net_amount = total_before_discounts - total_discount
+        
+        # Add payment charge
+        total_with_charge = net_amount + payment_charge_amount
+        change = amount_tendered - total_with_charge
+        
+        # Generate transaction ID
+        transaction_id = generate_short_id()
+        
+        # Calculate loyalty points to earn (based on NET amount after all discounts)
+        loyalty_points_earned = 0
+        if customer_id:
+            points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
+            loyalty_points_earned = int(net_amount * points_per_dollar)
+        
+        # Create transaction record with ALL discount information - FIXED: Add default values for missing fields
+        transaction = {
+            'transaction_id': transaction_id,
+            'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+            'cashier': st.session_state.user_info['username'],
+            'items': cart_items.copy(),
+            'subtotal': subtotal,
+            'tax': tax_amount,
+            'offer_discount': offer_discount,
+            'manual_discount': manual_discount,
+            'loyalty_discount': loyalty_discount,
+            'points_discount': points_discount,
+            'total_discount': total_discount,
+            'total_before_discounts': total_before_discounts,
+            'total': net_amount,  # This is the amount before payment charges
+            'payment_method': payment_method,
+            'payment_charge_percent': payment_charge_percent,
+            'payment_charge_amount': payment_charge_amount,
+            'amount_tendered': amount_tendered,
+            'change': change,
+            'shift_id': st.session_state.shift_id if st.session_state.shift_started else None,
+            'customer_id': customer_id,
+            'loyalty_points_earned': loyalty_points_earned,
+            'loyalty_points_redeemed': points_to_redeem,
+            'net_amount': net_amount,  # This is what should match reports
+            
+            # ADD DEFAULT VALUES FOR BACKWARD COMPATIBILITY
+            'discount': manual_discount,  # Map manual_discount to the legacy 'discount' field
+            'loyalty_points': loyalty_points_earned  # Add default loyalty_points field
+        }
+        
+        # Add offer information if applied
+        if selected_offer:
+            transaction['applied_offer'] = selected_offer
+        
+        # Update inventory
+        for barcode, item in cart_items.items():
+            if barcode in inventory:
+                inventory[barcode]['quantity'] -= item['quantity']
+                inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+                inventory[barcode]['updated_by'] = st.session_state.user_info['username']
+            else:
+                st.error(f"Product {barcode} not found in inventory")
+                return False
+        
+        # Update loyalty points and customer data
+        if customer_id and customer_id in customers:
+            # Calculate net points change
+            net_points_change = loyalty_points_earned - points_to_redeem
+            customers[customer_id]['points'] = customers[customer_id].get('points', 0) + net_points_change
+            customers[customer_id]['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Update customer statistics
+            customers[customer_id]['total_spent'] = customers[customer_id].get('total_spent', 0) + net_amount
+            customers[customer_id]['visit_count'] = customers[customer_id].get('visit_count', 0) + 1
+            
+            # Check for tier upgrade
+            current_points = customers[customer_id]['points']
+            current_tier = customers[customer_id].get('tier', 'Bronze')
+            
+            tiers = loyalty_data.get('tiers', {})
+            new_tier = current_tier
+            for tier_name, tier_data in tiers.items():
+                if current_points >= tier_data.get('min_points', 0):
+                    tier_order = list(tiers.keys())
+                    if tier_order.index(tier_name) > tier_order.index(current_tier):
+                        new_tier = tier_name
+            
+            if new_tier != current_tier:
+                customers[customer_id]['tier'] = new_tier
+            
+            loyalty_data['customers'] = customers
+            save_data(loyalty_data, LOYALTY_FILE)
+        
+        # Update cash drawer if payment is cash
+        if payment_method == "Cash" and st.session_state.shift_started:
+            cash_drawer = load_data(CASH_DRAWER_FILE)
+            cash_drawer['current_balance'] += net_amount  # Use discounted amount
+            cash_drawer['transactions'].append({
+                'type': 'sale',
+                'amount': net_amount,
+                'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
+                'transaction_id': transaction_id,
+                'processed_by': st.session_state.user_info['username']
+            })
+            save_data(cash_drawer, CASH_DRAWER_FILE)
+        
+        # Save all changes
+        transactions[transaction_id] = transaction
+        save_data(transactions, TRANSACTIONS_FILE)
+        save_data(inventory, INVENTORY_FILE)
+        
+        # Generate and print receipt
+        receipt_text = generate_receipt(transaction)
+        if print_receipt(receipt_text):
+            st.success("Receipt printed successfully")
+        else:
+            st.error("Failed to print receipt")
+        
+        # Open cash drawer if enabled
+        if payment_method == "Cash":
+            open_cash_drawer()
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error processing sale: {str(e)}")
+        return False
+    
+# Helper function to apply offers to cart
+def apply_selected_offer_to_cart(cart_items, current_total, offer):
+    """
+    Apply a specific selected offer to the cart and return discount amount
+    """
+    products = load_data(PRODUCTS_FILE)
+    discount_amount = 0
+    
+    if offer['type'] == 'bogo':
+        # Buy One Get One Free offer
+        for barcode, item in cart_items.items():
+            if barcode in offer.get('products', []) or offer.get('apply_to_all', False):
+                if item['quantity'] >= offer['buy_quantity']:
+                    free_qty = (item['quantity'] // offer['buy_quantity']) * offer['get_quantity']
+                    item_discount = free_qty * item['price']
+                    discount_amount += item_discount
+    
+    elif offer['type'] == 'bundle':
+        # Bundle offer - check if all bundle products are in cart
+        bundle_products = offer.get('products', [])
+        if all(barcode in cart_items for barcode in bundle_products):
+            bundle_price = offer.get('bundle_price', 0)
+            original_price = sum(cart_items[barcode]['price'] * cart_items[barcode]['quantity'] 
+                               for barcode in bundle_products)
+            discount_amount = original_price - bundle_price
+    
+    elif offer['type'] == 'special_price':
+        # Special price offer
+        product_barcode = offer.get('product')
+        if product_barcode in cart_items:
+            special_price = offer.get('special_price', 0)
+            original_price = cart_items[product_barcode]['price']
+            quantity = cart_items[product_barcode]['quantity']
+            discount_amount = (original_price - special_price) * quantity
+    
+    elif offer['type'] == 'percentage_discount':
+        # Percentage discount offer
+        discount_percent = offer.get('discount_percent', 0) / 100
+        applicable_products = []
+        
+        if offer.get('apply_to_all', False):
+            applicable_products = list(cart_items.keys())
+        else:
+            applicable_products = offer.get('products', [])
+        
+        for barcode in applicable_products:
+            if barcode in cart_items:
+                item = cart_items[barcode]
+                item_discount = item['price'] * item['quantity'] * discount_percent
+                discount_amount += item_discount
+    
+    elif offer['type'] == 'fixed_discount':
+        # Fixed amount discount offer
+        discount_amount_per_item = offer.get('discount_amount', 0)
+        applicable_products = []
+        
+        if offer.get('apply_to_all', False):
+            applicable_products = list(cart_items.keys())
+        else:
+            applicable_products = offer.get('products', [])
+        
+        for barcode in applicable_products:
+            if barcode in cart_items:
+                item = cart_items[barcode]
+                total_discount = discount_amount_per_item * item['quantity']
+                discount_amount += total_discount
+    
+    return discount_amount
+
 def print_all_receipts(transactions):
     """Print receipts for all transactions"""
     success_count = 0
@@ -2496,405 +2988,9 @@ def pos_manual_mode():
     
     display_cart_and_checkout()
 
-def display_cart_and_checkout():
-    settings = load_data(SETTINGS_FILE)
-    payment_charges = settings.get('payment_charges', {
-        "cash": 0.0,
-        "credit_card": 2.0,
-        "debit_card": 1.0,
-        "mobile_payment": 1.5,
-        "bank_transfer": 0.5,
-        "international_card": 3.0
-    })
-    
-    st.header("Current Sale")
-    
-    # Initialize loyalty session state
-    if 'loyalty_customer_id' not in st.session_state:
-        st.session_state.loyalty_customer_id = None
-    if 'loyalty_points_to_redeem' not in st.session_state:
-        st.session_state.loyalty_points_to_redeem = 0
-    if 'loyalty_customer_data' not in st.session_state:
-        st.session_state.loyalty_customer_data = None
-    
-    # Create a copy of the cart items to avoid modification during iteration
-    cart_items = list(st.session_state.cart.items())
-    items_to_remove = []
-    
-    if cart_items:
-        for barcode, item in cart_items:
-            with st.container():
-                col1, col2, col3, col4 = st.columns([4, 2, 2, 1])
-                with col1:
-                    st.write(f"**{item['name']}**")
-                    if item.get('description'):
-                        with st.expander("Description"):
-                            st.write(item['description'])
-                with col2:
-                    new_qty = st.number_input(
-                        "Qty", 
-                        min_value=1, 
-                        max_value=100, 
-                        value=item['quantity'], 
-                        key=f"edit_{barcode}"
-                    )
-                    if new_qty != item['quantity']:
-                        st.session_state.cart[barcode]['quantity'] = new_qty
-                with col3:
-                    st.write(f"{format_currency(item['price'] * item['quantity'])}")
-                with col4:
-                    if st.button("❌", key=f"remove_{barcode}"):
-                        items_to_remove.append(barcode)
-        
-        # Remove items after iteration is complete
-        for barcode in items_to_remove:
-            if barcode in st.session_state.cart:
-                del st.session_state.cart[barcode]
-        
-        # Recalculate totals after potential changes
-        subtotal = sum(item['price'] * item['quantity'] for item in st.session_state.cart.values())
-        tax_rate = settings.get('tax_rate', 0.0)
-        tax_amount = subtotal * tax_rate
-        
-        # Calculate total before offers and payment charges
-        total_before_offers = subtotal + tax_amount
-        
-        # Apply offers only if selected
-        offers = load_data(OFFERS_FILE)
-        active_offers = [o for o in offers.values() if o['active']]
-        
-        # Check if any offer is selected in the session state
-        selected_offer_name = st.session_state.get('selected_offer', None)
-        selected_offer = None
-        
-        if selected_offer_name:
-            for offer in active_offers:
-                if offer['name'] == selected_offer_name:
-                    selected_offer = offer
-                    break
-        
-        # Apply the selected offer if any
-        total_after_offers = total_before_offers
-        if selected_offer:
-            total_after_offers = apply_selected_offer(st.session_state.cart, total_before_offers, selected_offer)
-        
-        # Apply discounts
-        discounts = load_data(DISCOUNTS_FILE)
-        active_discounts = [d for d in discounts.values() if d['active']]
-        
-        final_total = total_after_offers
-        
-        if active_discounts:
-            discount_options = {d['name']: d for d in active_discounts}
-            selected_discount = st.selectbox("Apply Discount", [""] + list(discount_options.keys()))
-            
-            if selected_discount:
-                discount = discount_options[selected_discount]
-                if discount['type'] == 'percentage':
-                    discount_amount = final_total * (discount['value'] / 100)
-                else:
-                    discount_amount = discount['value']
-                
-                final_total -= discount_amount
-                st.write(f"Discount Applied: -{format_currency(discount_amount)}")
-        
-        # LOYALTY SECTION - Integrated perfectly
-        st.markdown("---")
-        st.subheader("🎯 Loyalty Program")
-        
-        loyalty_data = load_data(LOYALTY_FILE)
-        customers = loyalty_data.get('customers', {})
-        
-        # Customer lookup form
-        with st.form("loyalty_lookup_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                customer_phone = st.text_input("Customer Phone", key="loyalty_phone_input")
-            with col2:
-                customer_id_input = st.text_input("Customer ID", key="customer_id_input")
-            
-            if st.form_submit_button("🔍 Find Customer", use_container_width=True):
-                customer_found = None
-                customer_id = None
-                
-                # Search by phone
-                if customer_phone:
-                    for cust_id, cust_data in customers.items():
-                        if cust_data.get('phone') == customer_phone:
-                            customer_found = cust_data
-                            customer_id = cust_id
-                            break
-                
-                # Search by ID
-                if not customer_found and customer_id_input and customer_id_input in customers:
-                    customer_found = customers[customer_id_input]
-                    customer_id = customer_id_input
-                
-                if customer_found:
-                    st.session_state.loyalty_customer_id = customer_id
-                    st.session_state.loyalty_customer_data = customer_found
-                    st.success(f"✅ Customer found: {customer_found.get('name', 'Unknown')}")
-                else:
-                    st.session_state.loyalty_customer_id = None
-                    st.session_state.loyalty_customer_data = None
-                    st.warning("❌ Customer not found")
-        
-        # Display customer info if found
-        if st.session_state.loyalty_customer_data:
-            customer = st.session_state.loyalty_customer_data
-            
-            # Clear customer button
-            if st.button("🗑️ Clear Customer", key="clear_loyalty_customer", use_container_width=True):
-                st.session_state.loyalty_customer_id = None
-                st.session_state.loyalty_points_to_redeem = 0
-                st.session_state.loyalty_customer_data = None
-                st.rerun()
-            
-            st.info(f"**{customer.get('name', 'Unknown')}** - {customer.get('tier', 'Bronze')} Tier")
-            st.info(f"Points: {customer.get('points', 0)}")
-            
-            # Points redemption
-            max_points_to_redeem = customer.get('points', 0)
-            points_value = loyalty_data.get('settings', {}).get('points_value', 0.01)
-            
-            if max_points_to_redeem > 0:
-                st.session_state.loyalty_points_to_redeem = st.number_input(
-                    "Points to redeem", 
-                    min_value=0, 
-                    max_value=min(max_points_to_redeem, int(final_total / points_value)),
-                    value=st.session_state.loyalty_points_to_redeem,
-                    step=10,
-                    key="points_redeem_input"
-                )
-                
-                if st.session_state.loyalty_points_to_redeem > 0:
-                    points_discount = st.session_state.loyalty_points_to_redeem * points_value
-                    final_total -= points_discount
-                    st.success(f"🎉 Redeeming {st.session_state.loyalty_points_to_redeem} points: -{format_currency(points_discount)}")
-        
-        # Calculate loyalty points to earn (for display only)
-        if st.session_state.loyalty_customer_id:
-            points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
-            loyalty_points_earned = int(final_total * points_per_dollar)
-            st.info(f"📈 Points to earn: {loyalty_points_earned}")
-        
-        # Apply tier discount if customer has a tier
-        loyalty_discount_applied = 0
-        if st.session_state.loyalty_customer_data:
-            current_tier = st.session_state.loyalty_customer_data.get('tier', 'Bronze')
-            tier_settings = loyalty_data.get('tiers', {}).get(current_tier, {})
-            tier_discount = tier_settings.get('discount', 0)
-            
-            if tier_discount > 0:
-                loyalty_discount_applied = final_total * tier_discount
-                final_total -= loyalty_discount_applied
-                st.success(f"🏆 Tier discount ({current_tier}): -{format_currency(loyalty_discount_applied)}")
-        
-        st.markdown("---")
-        
-        # PAYMENT SECTION
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("💰 Summary")
-            st.write(f"Subtotal: {format_currency(subtotal)}")
-            st.write(f"Tax ({tax_rate*100}%): {format_currency(tax_amount)}")
-            if total_after_offers != total_before_offers:
-                st.write(f"After Offers: {format_currency(total_after_offers)}")
-            if final_total != total_after_offers:
-                st.write(f"After Discount: {format_currency(final_total)}")
-            if loyalty_discount_applied > 0:
-                st.write(f"Loyalty Discount: -{format_currency(loyalty_discount_applied)}")
-            st.write(f"**Total: {format_currency(final_total)}**")
-        
-        with col2:
-            st.subheader("💳 Payment")
-            payment_method = st.selectbox("Payment Method", 
-                                        ["Cash", "Credit Card", "Debit Card", "Mobile Payment", "Bank Transfer", "International Card"])
-            
-            # Calculate payment charge
-            payment_method_key = payment_method.lower().replace(" ", "_")
-            payment_charge_percent = payment_charges.get(payment_method_key, 0.0)
-            payment_charge_amount = final_total * (payment_charge_percent / 100)
-            
-            total_with_payment_charge = final_total + payment_charge_amount
-            
-            if payment_charge_percent > 0:
-                st.info(f"💸 Payment Fee ({payment_charge_percent}%): +{format_currency(payment_charge_amount)}")
-                st.write(f"**Amount Due: {format_currency(total_with_payment_charge)}**")
-            
-            amount_tendered = st.number_input("Amount Tendered", min_value=0.0, value=total_with_payment_charge, step=1.0)
-            
-            if st.button("✅ Complete Sale", type="primary", use_container_width=True):
-                if amount_tendered < total_with_payment_charge:
-                    st.error("❌ Amount tendered is less than total")
-                else:
-                    # Process the sale with loyalty integration
-                    success = process_sale(
-                        st.session_state.cart,
-                        payment_method,
-                        payment_charge_percent,
-                        payment_charge_amount,
-                        amount_tendered,
-                        selected_offer,
-                        st.session_state.loyalty_customer_id,
-                        st.session_state.loyalty_points_to_redeem,
-                        loyalty_discount_applied
-                    )
-                    
-                    if success:
-                        st.success("🎉 Sale completed successfully!")
-                        # Reset cart and loyalty state
-                        st.session_state.cart = {}
-                        st.session_state.selected_offer = None
-                        st.session_state.loyalty_customer_id = None
-                        st.session_state.loyalty_points_to_redeem = 0
-                        st.session_state.loyalty_customer_data = None
-                        st.rerun()
-                    
-    else:
-        st.info("🛒 Cart is empty")
 
-def process_sale(cart_items, payment_method, payment_charge_percent, payment_charge_amount, amount_tendered, selected_offer=None, customer_id=None, points_to_redeem=0, loyalty_discount=0):
-    try:
-        # Load necessary data
-        products = load_data(PRODUCTS_FILE)
-        inventory = load_data(INVENTORY_FILE)
-        transactions = load_data(TRANSACTIONS_FILE)
-        loyalty_data = load_data(LOYALTY_FILE)
-        customers = loyalty_data.get('customers', {})
-        
-        # Calculate totals
-        subtotal = sum(item['price'] * item['quantity'] for item in cart_items.values())
-        tax_rate = load_data(SETTINGS_FILE).get('tax_rate', 0.0)
-        tax_amount = subtotal * tax_rate
-        total = subtotal + tax_amount
-        
-        # Apply discount if any
-        discount_amount = 0
-        if selected_offer:
-            # Handle offer discount (this would be calculated based on the offer type)
-            pass
-        
-        # Apply loyalty discount (NEW)
-        if loyalty_discount > 0:
-            total -= loyalty_discount
-        
-        # Apply points redemption (NEW)
-        points_value = loyalty_data.get('settings', {}).get('points_value', 0.01)
-        points_discount = points_to_redeem * points_value
-        total -= points_discount
-        
-        # Add payment charge
-        total_with_charge = total + payment_charge_amount
-        change = amount_tendered - total_with_charge
-        
-        # Generate transaction ID
-        transaction_id = generate_short_id()
-        
-        # Calculate loyalty points to earn (NEW)
-        loyalty_points_earned = 0
-        if customer_id:
-            points_per_dollar = loyalty_data.get('settings', {}).get('points_per_dollar', 1)
-            loyalty_points_earned = int(total * points_per_dollar)
-        
-        # Create transaction record (UPDATED with loyalty fields)
-        transaction = {
-            'transaction_id': transaction_id,
-            'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
-            'cashier': st.session_state.user_info['username'],
-            'items': cart_items.copy(),
-            'subtotal': subtotal,
-            'tax': tax_amount,
-            'discount': discount_amount,
-            'loyalty_discount': loyalty_discount,  # NEW
-            'points_discount': points_discount,    # NEW
-            'total': total,
-            'payment_method': payment_method,
-            'payment_charge_percent': payment_charge_percent,
-            'payment_charge_amount': payment_charge_amount,
-            'amount_tendered': amount_tendered,
-            'change': change,
-            'shift_id': st.session_state.shift_id if st.session_state.shift_started else None,
-            'customer_id': customer_id,  # NEW
-            'loyalty_points_earned': loyalty_points_earned,  # NEW
-            'loyalty_points_redeemed': points_to_redeem  # NEW
-        }
-        
-        # Add offer information if applied
-        if selected_offer:
-            transaction['applied_offer'] = selected_offer['name']
-        
-        # Update inventory
-        for barcode, item in cart_items.items():
-            if barcode in inventory:
-                inventory[barcode]['quantity'] -= item['quantity']
-                inventory[barcode]['last_updated'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
-                inventory[barcode]['updated_by'] = st.session_state.user_info['username']
-            else:
-                st.error(f"Product {barcode} not found in inventory")
-                return False
-        
-        # Update loyalty points and customer data (NEW)
-        if customer_id and customer_id in customers:
-            # Calculate net points change
-            net_points_change = loyalty_points_earned - points_to_redeem
-            customers[customer_id]['points'] = customers[customer_id].get('points', 0) + net_points_change
-            customers[customer_id]['last_activity'] = get_current_datetime().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Check for tier upgrade
-            current_points = customers[customer_id]['points']
-            current_tier = customers[customer_id].get('tier', 'Bronze')
-            
-            # Check all tiers to see if customer qualifies for upgrade
-            tiers = loyalty_data.get('tiers', {})
-            new_tier = current_tier
-            for tier_name, tier_data in tiers.items():
-                if current_points >= tier_data.get('min_points', 0):
-                    # Check if this tier is higher than current
-                    tier_order = list(tiers.keys())
-                    if tier_order.index(tier_name) > tier_order.index(current_tier):
-                        new_tier = tier_name
-            
-            if new_tier != current_tier:
-                customers[customer_id]['tier'] = new_tier
-            
-            loyalty_data['customers'] = customers
-            save_data(loyalty_data, LOYALTY_FILE)
-        
-        # Update cash drawer if payment is cash
-        if payment_method == "Cash" and st.session_state.shift_started:
-            cash_drawer = load_data(CASH_DRAWER_FILE)
-            cash_drawer['current_balance'] += total_with_charge
-            cash_drawer['transactions'].append({
-                'type': 'sale',
-                'amount': total_with_charge,
-                'date': get_current_datetime().strftime("%Y-%m-%d %H:%M:%S"),
-                'transaction_id': transaction_id,
-                'processed_by': st.session_state.user_info['username']
-            })
-            save_data(cash_drawer, CASH_DRAWER_FILE)
-        
-        # Save all changes
-        transactions[transaction_id] = transaction
-        save_data(transactions, TRANSACTIONS_FILE)
-        save_data(inventory, INVENTORY_FILE)
-        
-        # Generate and print receipt
-        receipt_text = generate_receipt(transaction)
-        if print_receipt(receipt_text):
-            st.success("Receipt printed successfully")
-        else:
-            st.error("Failed to print receipt")
-        
-        # Open cash drawer if enabled
-        if payment_method == "Cash":
-            open_cash_drawer()
-        
-        return True
-        
-    except Exception as e:
-        st.error(f"Error processing sale: {str(e)}")
-        return False
+
+
 
 def generate_receipt(transaction):
     settings = load_data(SETTINGS_FILE)
@@ -2922,46 +3018,35 @@ def generate_receipt(transaction):
     receipt += "=" * 40 + "\n"
     receipt += f"Subtotal: {format_currency(transaction['subtotal'])}\n"
     receipt += f"Tax: {format_currency(transaction['tax'])}\n"
+    receipt += f"Total Before Discounts: {format_currency(transaction.get('total_before_discounts', transaction['subtotal'] + transaction['tax']))}\n"
     
-    # Discounts - FIXED: Handle missing discount field
-    discount_amount = transaction.get('discount', 0)
-    if discount_amount != 0:
-        receipt += f"Discount: -{format_currency(abs(discount_amount))}\n"
+    # Show all discount types clearly
+    if transaction.get('offer_discount', 0) > 0:
+        receipt += f"Offer Discount: -{format_currency(transaction['offer_discount'])}\n"
     
-    # Loyalty discount - FIXED: Handle missing field
-    loyalty_discount = transaction.get('loyalty_discount', 0)
-    if loyalty_discount != 0:
-        receipt += f"Loyalty Discount: -{format_currency(abs(loyalty_discount))}\n"
+    if transaction.get('loyalty_discount', 0) > 0:
+        receipt += f"Loyalty Discount: -{format_currency(transaction['loyalty_discount'])}\n"
     
-    # Points discount - FIXED: Handle missing field
-    points_discount = transaction.get('points_discount', 0)
-    if points_discount != 0:
-        receipt += f"Points Discount: -{format_currency(abs(points_discount))}\n"
+    if transaction.get('points_discount', 0) > 0:
+        receipt += f"Points Discount: -{format_currency(transaction['points_discount'])}\n"
     
-    receipt += f"Total: {format_currency(transaction['total'])}\n"
+    receipt += f"Total Discounts: -{format_currency(transaction.get('total_discount', 0))}\n"
+    receipt += "=" * 40 + "\n"
+    receipt += f"Net Amount: {format_currency(transaction.get('net_amount', transaction['total']))}\n"
     
-    # Loyalty points - FIXED: Handle missing fields
-    loyalty_points_earned = transaction.get('loyalty_points_earned', 0)
-    if loyalty_points_earned > 0:
-        receipt += f"Loyalty Points Earned: +{loyalty_points_earned}\n"
-    
-    loyalty_points_redeemed = transaction.get('loyalty_points_redeemed', 0)
-    if loyalty_points_redeemed > 0:
-        receipt += f"Loyalty Points Redeemed: -{loyalty_points_redeemed}\n"
-    
-    # Show payment charge if any - FIXED: Handle missing fields
+    # Show payment charge if any
     payment_charge_amount = transaction.get('payment_charge_amount', 0)
     payment_charge_percent = transaction.get('payment_charge_percent', 0)
     if payment_charge_amount > 0:
         receipt += f"Payment Fee ({payment_charge_percent}%): {format_currency(payment_charge_amount)}\n"
-        receipt += f"Amount Due: {format_currency(transaction['total'] + payment_charge_amount)}\n"
+        receipt += f"Amount Due: {format_currency(transaction.get('net_amount', transaction['total']) + payment_charge_amount)}\n"
     
     receipt += f"Payment Method: {transaction['payment_method']}\n"
     receipt += f"Amount Tendered: {format_currency(transaction['amount_tendered'])}\n"
     receipt += f"Change: {format_currency(transaction['change'])}\n"
     receipt += "=" * 40 + "\n"
     
-    # Loyalty summary - FIXED: Handle missing customer_id
+    # Loyalty summary
     customer_id = transaction.get('customer_id')
     if customer_id:
         loyalty_data = load_data(LOYALTY_FILE)
