@@ -750,7 +750,7 @@ def cashier_loyalty_management():
                 search_term = st.text_input("Enter Customer Name", placeholder="e.g., John Smith")
         
         # Search button
-        if st.button("🔍 Search Customer", use_container_width=True):
+        if st.button("🔍 Search Customer", use_container_width=True, key="search_customer_btn"):
             found_customers = []
             
             if search_term:
@@ -775,7 +775,7 @@ def cashier_loyalty_management():
         if 'found_customers' in st.session_state and st.session_state.found_customers:
             st.subheader("Search Results")
             
-            for customer_id, customer in st.session_state.found_customers:
+            for i, (customer_id, customer) in enumerate(st.session_state.found_customers):
                 col1, col2, col3 = st.columns([3, 2, 1])
                 with col1:
                     st.write(f"**{customer.get('name', 'Unknown')}**")
@@ -784,7 +784,7 @@ def cashier_loyalty_management():
                     st.write(f"Points: {customer.get('points', 0)}")
                     st.write(f"Tier: {customer.get('tier', 'Bronze')}")
                 with col3:
-                    if st.button("Select", key=f"select_{customer_id}", use_container_width=True):
+                    if st.button("Select", key=f"select_{customer_id}_{i}", use_container_width=True):
                         st.session_state.selected_customer_id = customer_id
                         st.rerun()
     
@@ -855,7 +855,7 @@ def cashier_loyalty_management():
                 
                 if customer_transactions:
                     for i, trans in enumerate(customer_transactions[:5]):  # Show last 5 transactions
-                        with st.expander(f"Transaction {trans.get('date', 'Unknown date')} - {format_currency(trans.get('total', 0))}"):
+                        with st.expander(f"Transaction {trans.get('date', 'Unknown date')} - {format_currency(trans.get('total', 0))}", key=f"trans_{i}"):
                             col1, col2 = st.columns(2)
                             with col1:
                                 st.write(f"**Date:** {trans.get('date', 'N/A')}")
@@ -876,12 +876,11 @@ def cashier_loyalty_management():
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    if st.button("🖨️ Print Loyalty Card", use_container_width=True):
+                    if st.button("🖨️ Print Loyalty Card", key="print_loyalty_card", use_container_width=True):
                         print_loyalty_card(customer_id, customer)
-            
                 
                 with col2:
-                    if st.button("🔄 Refresh Data", use_container_width=True):
+                    if st.button("🔄 Refresh Data", key="refresh_customer_data", use_container_width=True):
                         st.rerun()
     
     with tab3:
@@ -903,7 +902,7 @@ def cashier_loyalty_management():
                 st.info("No rewards currently available")
             else:
                 # Display rewards
-                for reward_id, reward in active_rewards.items():
+                for i, (reward_id, reward) in enumerate(active_rewards.items()):
                     points_required = reward.get('points', 0)
                     can_redeem = current_points >= points_required
                     
@@ -922,10 +921,10 @@ def cashier_loyalty_management():
                         
                         with col3:
                             if can_redeem:
-                                if st.button("Redeem", key=f"redeem_{reward_id}", use_container_width=True):
+                                if st.button("Redeem", key=f"redeem_{reward_id}_{i}", use_container_width=True):
                                     redeem_reward(customer_id, reward_id, reward)
                             else:
-                                st.button("Redeem", disabled=True, use_container_width=True)
+                                st.button("Redeem", key=f"redeem_disabled_{reward_id}_{i}", disabled=True, use_container_width=True)
                         
                         st.markdown("---")
     
@@ -937,29 +936,29 @@ def cashier_loyalty_management():
             
             col1, col2 = st.columns(2)
             with col1:
-                name = st.text_input("Full Name*", help="Customer's full name")
-                phone = st.text_input("Phone Number*", help="Primary contact number")
+                name = st.text_input("Full Name*", help="Customer's full name", key="new_cust_name")
+                phone = st.text_input("Phone Number*", help="Primary contact number", key="new_cust_phone")
             with col2:
-                email = st.text_input("Email Address", help="Optional email address")
-                initial_points = st.number_input("Initial Points", min_value=0, value=0, help="Starting loyalty points")
+                email = st.text_input("Email Address", help="Optional email address", key="new_cust_email")
+                initial_points = st.number_input("Initial Points", min_value=0, value=0, help="Starting loyalty points", key="new_cust_points")
             
             # Address information
             st.subheader("Address Information (Optional)")
-            address = st.text_area("Street Address")
+            address = st.text_area("Street Address", key="new_cust_address")
             
             col1, col2 = st.columns(2)
             with col1:
-                city = st.text_input("City")
+                city = st.text_input("City", key="new_cust_city")
             with col2:
-                postal_code = st.text_input("Postal Code")
+                postal_code = st.text_input("Postal Code", key="new_cust_postal")
             
             # Marketing preferences
             st.subheader("Communication Preferences")
             col1, col2 = st.columns(2)
             with col1:
-                accept_emails = st.checkbox("Email offers and updates", value=True)
+                accept_emails = st.checkbox("Email offers and updates", value=True, key="new_cust_emails")
             with col2:
-                accept_sms = st.checkbox("SMS/text messages", value=True)
+                accept_sms = st.checkbox("SMS/text messages", value=True, key="new_cust_sms")
             
             if st.form_submit_button("➕ Add Customer", use_container_width=True):
                 if not name or not phone:
